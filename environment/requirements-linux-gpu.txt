@@ -1,6 +1,8 @@
 # Install torch from the CUDA 13.0 wheel index on the Linux GPU host.
 --extra-index-url https://download.pytorch.org/whl/cu130
 
+numpy
+pytest
 onnx==1.22.0
 onnxruntime==1.27.0
 torch==2.13.0+cu130
