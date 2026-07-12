@@ -18,7 +18,7 @@ from c3common.ir.graph import Graph, Node
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MODELS = ROOT / "specification/testcases/release_to_competitors/models"
+MODELS = ROOT / "models"
 
 
 class C31SpecificationTests(unittest.TestCase):

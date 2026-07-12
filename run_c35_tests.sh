@@ -8,7 +8,8 @@
 #   ./run_c35_tests.sh -v           # verbose output
 #
 # Prerequisites:
-#   - specification/ folder present (gitignored, copy separately)
+#   - models/ folder (in repo, contains ONNX model files)
+#   - .specification/ folder (gitignored, copy separately for test data)
 #   - Python 3.12 with deps from environment/requirements-linux-gpu.txt
 #   - NVIDIA GPU with driver >= 580.126.20 (for AEC GPU execution)
 # ============================================================
@@ -17,11 +18,16 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 # ----- check prerequisites ---------------------------------
-if [ ! -d "specification" ]; then
-    echo "ERROR: specification/ folder not found."
-    echo "  It is gitignored — copy it from the competition materials:"
-    echo "  scp -r specification/ user@server:/path/to/Hackathon/"
+if [ ! -d "models" ]; then
+    echo "ERROR: models/ folder not found."
+    echo "  It should be part of the repo — models are tracked by git."
     exit 1
+fi
+
+if [ ! -d ".specification" ]; then
+    echo "WARNING: .specification/ folder not found (test data)."
+    echo "  Copy it from the competition materials:"
+    echo "  scp -r .specification/ user@server:/path/to/Hackathon/"
 fi
 
 if [ -z "${VIRTUAL_ENV:-}" ]; then

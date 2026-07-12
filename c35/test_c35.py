@@ -14,8 +14,8 @@ import numpy as np
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MODELS_DIR = ROOT / "specification/testcases/release_to_competitors/models"
-TESTDATA_DIR = ROOT / "specification/testcases/release_to_competitors/testdata/c35"
+MODELS_DIR = ROOT / "models"
+TESTDATA_DIR = ROOT / ".specification" / "testcases" / "release_to_competitors" / "testdata" / "c35"
 
 
 class C35SpecificationTests(unittest.TestCase):

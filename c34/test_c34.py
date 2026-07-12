@@ -23,7 +23,7 @@ from c34.execution_plan import ExecutionPlan, LifetimeInterval
 
 MODELS_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "specification", "testcases", "release_to_competitors", "models",
+    "models",
 )
 MODEL_PATHS = {
     "mlp": os.path.join(MODELS_DIR, "mlp_v1.onnx"),
