@@ -1,4 +1,6 @@
 .ssh/
+.agents/
+.specification/
 
 # OS artifacts
 .DS_Store
