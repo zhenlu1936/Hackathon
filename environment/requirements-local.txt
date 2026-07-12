@@ -1,0 +1,5 @@
+# CPU-portable development subset of specification/environments.txt.
+onnx==1.22.0
+onnxruntime==1.27.0
+torch==2.13.0
+

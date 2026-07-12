@@ -1,0 +1,36 @@
+.ssh/
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Generated / cached artifacts (must not enter submission)
+*.dag.json
+output/
+*.plan.json
+*.cache
+
+# IDE and editor artifacts
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Development-only binaries / wheels (evaluator provides dependencies)
+*.whl
+!requirements*.txt
+
+# Log files
+*.log
+
