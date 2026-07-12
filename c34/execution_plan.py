@@ -50,6 +50,8 @@ class KernelStep:
     step_index: int               # position in the global schedule
     kernel_name: str              # e.g. "matmul_fp32", "relu_fp32"
     node_id: str                  # originating graph node
+    logical_inputs: List[str] = field(default_factory=list)
+    logical_outputs: List[str] = field(default_factory=list)
     inputs: Dict[str, str] = field(default_factory=dict)   # tensor_name -> alloc_id
     outputs: Dict[str, str] = field(default_factory=dict)  # tensor_name -> alloc_id
     stream_id: int = 1            # compute stream ID (0 = copy stream)
@@ -168,26 +170,40 @@ class ExecutionPlan:
 
         alloc_ids = {a.alloc_id for a in self.allocations}
         event_ids = {e.event_id for e in self.events}
+        producer_steps: Dict[str, int] = {}
+        for k in self.kernel_steps:
+            for tname in k.logical_outputs:
+                if tname:
+                    producer_steps[tname] = k.step_index
 
         for k in self.kernel_steps:
-            # Every kernel input must have a binding
-            if not k.inputs:
-                issues.append(
-                    f"Kernel step {k.step_index} '{k.kernel_name}' "
-                    f"has no input bindings"
-                )
+            # Every declared logical input/output must have a binding.  A
+            # Constant kernel legitimately has no inputs, so checking whether
+            # the binding dict itself is empty would reject valid plans.
+            for tname in k.logical_inputs:
+                if tname and tname not in k.inputs:
+                    issues.append(
+                        f"Kernel step {k.step_index} '{k.kernel_name}' "
+                        f"is missing input binding for '{tname}'"
+                    )
+                producer_step = producer_steps.get(tname)
+                if producer_step is not None and producer_step >= k.step_index:
+                    issues.append(
+                        f"Kernel step {k.step_index} '{k.kernel_name}' consumes "
+                        f"'{tname}' before producer step {producer_step}"
+                    )
             for tname, aid in k.inputs.items():
                 if aid not in alloc_ids:
                     issues.append(
                         f"Kernel step {k.step_index} '{k.kernel_name}' "
                         f"input '{tname}' references unknown alloc_id '{aid}'"
                     )
-            # Every kernel output must have a binding
-            if not k.outputs:
-                issues.append(
-                    f"Kernel step {k.step_index} '{k.kernel_name}' "
-                    f"has no output bindings"
-                )
+            for tname in k.logical_outputs:
+                if tname and tname not in k.outputs:
+                    issues.append(
+                        f"Kernel step {k.step_index} '{k.kernel_name}' "
+                        f"is missing output binding for '{tname}'"
+                    )
             for tname, aid in k.outputs.items():
                 if aid not in alloc_ids:
                     issues.append(

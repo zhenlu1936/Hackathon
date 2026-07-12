@@ -137,6 +137,12 @@ class Graph:
 
     def add_node(self, node: Node) -> None:
         self.nodes[node.id] = node
+        # Keep dependency metadata synchronized for programmatically-created
+        # nodes (notably C3.3 fused nodes).  Importers may call add_consumer
+        # again; that method is intentionally idempotent.
+        for tensor_name in node.inputs:
+            if tensor_name:
+                self.add_consumer(tensor_name, node.id)
 
     def get_tensor(self, name: str) -> Optional[Tensor]:
         return self.tensors.get(name)
@@ -266,6 +272,10 @@ class Graph:
                             f"Node '{node_id}' input '{inp}' has invalid producer "
                             f"'{producer}'"
                         )
+                if node_id not in self.tensor_consumers.get(inp, []):
+                    raise ValueError(
+                        f"Node '{node_id}' input '{inp}' is missing its consumer index"
+                    )
 
         # Collect dead tensors (no producer, no active consumers) for cleanup
         dead_tensors = []
@@ -364,6 +374,11 @@ class Graph:
 
     def reroute_consumers(self, old_tensor: str, new_tensor: str) -> None:
         """Reroute all consumers of old_tensor to new_tensor."""
+        # Fusion commonly preserves the final tensor name.  Treating that as a
+        # normal reroute used to rebuild and then delete the same consumer list,
+        # silently removing dependency edges and corrupting topological order.
+        if old_tensor == new_tensor:
+            return
         if old_tensor not in self.tensor_consumers:
             return
         consumers = list(self.tensor_consumers.get(old_tensor, []))

@@ -6,6 +6,7 @@ and executes nodes in topological order using the AEC compute engine.
 
 from __future__ import annotations
 
+import copy
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -13,6 +14,7 @@ import numpy as np
 import onnx
 
 from c3common.ir.graph import Graph, Node
+from c34.execution_plan import ExecutionPlan
 from c35.engine import execute_op
 
 
@@ -196,6 +198,142 @@ class GraphExecutor:
                     )
 
 
+class PlannedGraphExecutor(GraphExecutor):
+    """Reference executor whose node order is authorized by a C3.4 plan.
+
+    The plan contains decomposed C3.2 kernel steps.  This CPU reference still
+    evaluates each high-level node with NumPy, but it refuses to execute unless
+    every planned kernel binding/event is valid and every optimized graph node
+    is represented in the plan.  It therefore connects and tests the compiler
+    stages without pretending to be the unavailable AEC device runtime.
+    """
+
+    def run_planned(
+        self,
+        feed_dict: Dict[str, np.ndarray],
+        plan: ExecutionPlan,
+    ) -> Dict[str, np.ndarray]:
+        issues = plan.validate()
+        if issues:
+            raise ValueError(
+                "C3.4 execution plan is invalid: " + "; ".join(issues[:10])
+            )
+
+        sample_counts = {arr.shape[0] for arr in feed_dict.values() if arr.ndim > 0}
+        if len(sample_counts) != 1:
+            raise ValueError("Planned execution requires equal input batch sizes")
+        if sample_counts and plan.batch_size != next(iter(sample_counts)):
+            raise ValueError(
+                f"Plan batch size {plan.batch_size} does not match feed batch "
+                f"size {next(iter(sample_counts))}"
+            )
+
+        planned_node_order: List[str] = []
+        seen = set()
+        for step in plan.kernel_steps:
+            if step.node_id not in seen:
+                seen.add(step.node_id)
+                planned_node_order.append(step.node_id)
+
+        graph_nodes = set(self.graph.nodes)
+        if seen != graph_nodes:
+            missing = sorted(graph_nodes - seen)
+            unexpected = sorted(seen - graph_nodes)
+            raise ValueError(
+                "C3.4 plan/optimized-graph mismatch: "
+                f"missing_nodes={missing[:10]}, unexpected_nodes={unexpected[:10]}"
+            )
+
+        self.values.clear()
+        self.values.update(self.weights)
+        self.values.update(self.constants)
+        self.values.update(feed_dict)
+        for node_id in planned_node_order:
+            self._execute_node(self.graph.nodes[node_id])
+
+        outputs: Dict[str, np.ndarray] = {}
+        for out_tensor in self.graph.outputs:
+            if out_tensor.name not in self.values:
+                raise KeyError(f"Planned graph did not produce '{out_tensor.name}'")
+            outputs[out_tensor.name] = self.values[out_tensor.name]
+        return outputs
+
+
+class CrossStageReferencePipeline:
+    """Connected C3.1→C3.5 FP32 reference pipeline.
+
+    C3.3 mutates an imported C3.1 graph, C3.4 consumes its C3.2 lowering, and
+    :class:`PlannedGraphExecutor` consumes the resulting plan.  The first
+    optimized batch is checked against the original unfused FP32 graph.
+    """
+
+    def __init__(self, graph: Graph, model_path: str) -> None:
+        from c33.pipeline import GraphPassPipeline
+
+        baseline_graph = copy.deepcopy(graph)
+        self.graph = graph
+        self.fusion_result = GraphPassPipeline().run(self.graph)
+        stats = self.fusion_result["Fusion"]["stats"]
+        if not stats["validation_passed"]:
+            raise ValueError("C3.3 produced an invalid optimized graph")
+
+        self.baseline_executor = GraphExecutor(baseline_graph, model_path)
+        self.optimized_executor = PlannedGraphExecutor(self.graph, model_path)
+        self._plan_cache: Dict[int, ExecutionPlan] = {}
+        self._qualified = False
+        self.qualification_max_abs_diff: Optional[float] = None
+        self.last_plan: Optional[ExecutionPlan] = None
+
+    def _plan_for_batch(self, batch_size: int) -> ExecutionPlan:
+        from c34.scheduler import ExecutionScheduler
+
+        if batch_size not in self._plan_cache:
+            plan = ExecutionScheduler(self.graph, batch_size=batch_size).build()
+            issues = plan.validate()
+            if issues:
+                raise ValueError(
+                    "C3.4 rejected before execution: " + "; ".join(issues[:10])
+                )
+            self._plan_cache[batch_size] = plan
+        return self._plan_cache[batch_size]
+
+    def run(self, feed_dict: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+        batch_sizes = {arr.shape[0] for arr in feed_dict.values() if arr.ndim > 0}
+        if len(batch_sizes) != 1:
+            raise ValueError("All graph inputs must have the same batch dimension")
+        batch_size = next(iter(batch_sizes))
+        plan = self._plan_for_batch(batch_size)
+        self.last_plan = plan
+        optimized = self.optimized_executor.run_planned(feed_dict, plan)
+
+        if not self._qualified:
+            baseline = self.baseline_executor.run(feed_dict)
+            max_diff = 0.0
+            for name, expected in baseline.items():
+                if name not in optimized:
+                    raise KeyError(f"Optimized graph did not produce '{name}'")
+                actual = optimized[name]
+                if actual.shape != expected.shape:
+                    raise ValueError(
+                        f"Optimized output '{name}' shape {actual.shape} != "
+                        f"baseline {expected.shape}"
+                    )
+                if actual.size:
+                    max_diff = max(
+                        max_diff,
+                        float(np.max(np.abs(actual.astype(np.float32) - expected.astype(np.float32)))),
+                    )
+                if not np.allclose(actual, expected, rtol=1e-3, atol=1e-3):
+                    raise ValueError(
+                        f"C3.3 numerical qualification failed for '{name}': "
+                        f"max_abs_diff={max_diff:.6e}"
+                    )
+            self.qualification_max_abs_diff = max_diff
+            self._qualified = True
+
+        return optimized
+
+
 def load_and_infer(
     model_path: str,
     input_dir: str,
@@ -227,10 +365,7 @@ def load_and_infer(
     graph = import_onnx(model_path)
     t_parse_end = time.perf_counter()
 
-    # 2. Create executor
-    executor = GraphExecutor(graph, model_path)
-
-    # 3. Load inputs
+    # 2. Load and validate inputs before doing optimization/planning work.
     input_manifest_path = os.path.join(input_dir, "manifest.json")
     if not os.path.isfile(input_manifest_path):
         raise FileNotFoundError(f"Input manifest not found: {input_manifest_path}")
@@ -242,11 +377,25 @@ def load_and_infer(
     input_meta: Dict[str, Dict[str, Any]] = {}
     for entry in input_manifest.get("tensors", []):
         name = entry["name"]
+        if name in input_arrays:
+            raise ValueError(f"Duplicate input tensor in manifest: '{name}'")
         file_name = entry["file"]
         file_path = os.path.join(input_dir, file_name)
         if not os.path.isfile(file_path):
             raise FileNotFoundError(f"Input file not found: {file_path}")
         arr = np.load(file_path)
+        declared_dtype = entry.get("dtype")
+        if declared_dtype is not None and np.dtype(declared_dtype) != arr.dtype:
+            raise ValueError(
+                f"Input '{name}' dtype mismatch: manifest={declared_dtype}, "
+                f"npy={arr.dtype}"
+            )
+        declared_shape = entry.get("shape")
+        if declared_shape is not None and list(arr.shape) != list(declared_shape):
+            raise ValueError(
+                f"Input '{name}' shape mismatch: manifest={declared_shape}, "
+                f"npy={list(arr.shape)}"
+            )
         input_arrays[name] = arr
         input_meta[name] = {
             "dtype": entry.get("dtype", "float32"),
@@ -256,15 +405,65 @@ def load_and_infer(
     # 4. Determine batch size and validate
     if not input_arrays:
         raise ValueError("No input tensors found in manifest")
+    expected_inputs = {tensor.name: tensor for tensor in graph.inputs}
+    provided_names = set(input_arrays)
+    expected_names = set(expected_inputs)
+    if provided_names != expected_names:
+        raise ValueError(
+            "Input manifest names do not match graph inputs: "
+            f"missing={sorted(expected_names - provided_names)}, "
+            f"unexpected={sorted(provided_names - expected_names)}"
+        )
+
+    dtype_map = {
+        "FLOAT": np.dtype("float32"),
+        "FLOAT16": np.dtype("float16"),
+        "DOUBLE": np.dtype("float64"),
+        "INT32": np.dtype("int32"),
+        "INT64": np.dtype("int64"),
+        "BOOL": np.dtype("bool"),
+    }
+    for name, tensor in expected_inputs.items():
+        arr = input_arrays[name]
+        expected_dtype = dtype_map.get(tensor.dtype.value)
+        if expected_dtype is not None and arr.dtype != expected_dtype:
+            raise ValueError(
+                f"Input '{name}' dtype {arr.dtype} does not match graph "
+                f"dtype {expected_dtype}"
+            )
+        if len(arr.shape) != len(tensor.shape):
+            raise ValueError(
+                f"Input '{name}' rank {arr.ndim} does not match graph rank "
+                f"{len(tensor.shape)}"
+            )
+        for axis, (actual, declared) in enumerate(zip(arr.shape, tensor.shape)):
+            try:
+                expected_dim = int(declared)
+            except (TypeError, ValueError):
+                continue
+            if actual != expected_dim:
+                raise ValueError(
+                    f"Input '{name}' dimension {axis} is {actual}, expected "
+                    f"{expected_dim}"
+                )
+
+    sample_counts = {arr.shape[0] for arr in input_arrays.values()}
+    if len(sample_counts) != 1:
+        raise ValueError(
+            f"All graph inputs must have equal sample counts, got {sorted(sample_counts)}"
+        )
     first_key = next(iter(input_arrays))
     total_samples = input_arrays[first_key].shape[0]
+    if total_samples <= 0:
+        raise ValueError("Input tensors must contain at least one sample")
 
     if batch_size is None or batch_size <= 0:
         actual_batch = total_samples
     else:
         actual_batch = min(batch_size, total_samples)
 
-    # 5. Run inference in batches
+    # 5. Compile the connected C3.3/C3.4 reference pipeline and run batches.
+    executor = CrossStageReferencePipeline(graph, model_path)
     output_name = graph.outputs[0].name if graph.outputs else "logits"
     all_outputs: List[np.ndarray] = []
 
@@ -322,6 +521,7 @@ def load_and_infer(
 
     t_end = time.perf_counter()
 
+    fusion_stats = executor.fusion_result["Fusion"]["stats"]
     return {
         "model_path": model_path,
         "input_dir": input_dir,
@@ -332,4 +532,9 @@ def load_and_infer(
         "parse_time_s": t_parse_end - t_parse_start,
         "infer_time_s": t_infer_end - t_infer_start,
         "total_time_s": t_end - t_start,
+        "cross_stage_reference": True,
+        "optimized_graph_nodes": len(executor.graph.nodes),
+        "fusion_stats": fusion_stats,
+        "qualification_max_abs_diff": executor.qualification_max_abs_diff,
+        "plan_summary": executor.last_plan.summary() if executor.last_plan else None,
     }

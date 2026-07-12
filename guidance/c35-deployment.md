@@ -8,6 +8,8 @@ The evaluator times the whole process from startup to exit and samples per-proce
 
 Inference must run on the required AEC GPGPU path. A CPU, PyTorch, ONNX Runtime, CUDA, or mock backend may be used as a disclosed development reference, but cannot silently substitute for the submitted AEC implementation. The timed command must build/load only disclosed submission components, perform no network access, and generate outputs from the supplied model and inputs at evaluation time.
 
+Current implementation note: the CPU reference is cross-stage rather than standalone. It applies C3.3 to the shared graph, builds the C3.4 plan through C3.2 decomposition, validates complete bindings/events and plan/graph identity, executes nodes in planned order, and qualifies the optimized first batch against unfused FP32. CLI output labels this path `connected C3 CPU reference (not AEC)`; it is correctness evidence only.
+
 ## CLI and data contract
 
 Support:

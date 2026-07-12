@@ -231,15 +231,15 @@ def fuse_matmul_bias(graph: Graph, fusion_log: List[Dict[str, Any]]) -> int:
 
 
 def fuse_conv_batchnorm(graph: Graph, fusion_log: List[Dict[str, Any]]) -> int:
-    """Fuse Conv -> BatchNormalization into a single Conv with folded weights.
+    """Fuse Conv -> BatchNormalization while preserving all BN parameters.
 
     This pass requires both Conv and BatchNormalization node parameters to exist.
     The released ResNet-18 has BN already folded into Conv weights, so this pattern
     will not trigger on that model — it works for general graphs with explicit BN.
 
-    Folding formulas (inference):
-        w_fused = (w / sqrt(var + eps)) * gamma
-        b_fused = (b - mean) / sqrt(var + eps) * gamma + beta
+    The IR does not retain initializer payloads, so this pass produces an
+    executable fused operator rather than falsely claiming that it rewrote the
+    Conv initializer values.  A later compiler may fold the parameters.
     """
     fusions = 0
     processed_nodes: Set[str] = set()
@@ -309,14 +309,14 @@ def fuse_conv_batchnorm(graph: Graph, fusion_log: List[Dict[str, Any]]) -> int:
         # Record the fusion since we have the right structure
         fused_id = _generate_fused_node_id("FusedConv2dBatchNorm", node_id, consumer_id)
 
-        # Create fused node — in an actual runtime, we'd fold BN weights into Conv
-        # Here we record the fusion metadata; actual weight folding requires tensor values
+        # Preserve the BN parameter inputs.  The shared IR currently carries
+        # tensor metadata but not initializer payloads, so destructive compile-
+        # time weight folding cannot be done truthfully here.  Keeping the
+        # parameters makes the fused node numerically executable by a backend
+        # that implements Conv+BN as one operation.
         attrs = dict(node.attributes)
         attrs["bn_epsilon"] = epsilon
-        attrs["bn_scale"] = scale
-        attrs["bn_bias"] = bias_bn
-        attrs["bn_mean"] = mean
-        attrs["bn_var"] = var
+        attrs["bn_parameter_offset"] = len(node.inputs)
 
         # Clear old BN output producer so we can reassign
         for out_name in consumer.outputs:
@@ -327,7 +327,7 @@ def fuse_conv_batchnorm(graph: Graph, fusion_log: List[Dict[str, Any]]) -> int:
             id=fused_id,
             name=f"fused_conv_bn_{node_id}_{consumer_id}",
             op_type="FusedConv2dBatchNorm",
-            inputs=list(node.inputs),
+            inputs=list(node.inputs) + [scale, bias_bn, mean, var],
             outputs=list(consumer.outputs),
             attributes=attrs,
         )
@@ -450,9 +450,33 @@ def fuse_elementwise_chain(graph: Graph, fusion_log: List[Dict[str, Any]]) -> in
         first_node = chain_nodes[0]
         last_node = chain_nodes[-1]
 
-        # Inputs = first node's inputs; outputs = last node's outputs
-        fused_inputs = list(first_node.inputs)
+        # Inputs include every value entering the chain from outside, not just
+        # the first node's inputs.  Store an explicit per-op dataflow program
+        # so the executor does not have to guess which operand each op used.
+        internal_outputs = {
+            out for cn in chain_nodes for out in cn.outputs if out
+        }
+        fused_inputs: List[str] = []
+        for cn in chain_nodes:
+            for inp in cn.inputs:
+                if inp and inp not in internal_outputs and inp not in fused_inputs:
+                    fused_inputs.append(inp)
         fused_outputs = list(last_node.outputs)
+
+        input_index = {name: idx for idx, name in enumerate(fused_inputs)}
+        op_program: List[Dict[str, Any]] = []
+        for cn in chain_nodes:
+            refs: List[Any] = []
+            for inp in cn.inputs:
+                if not inp:
+                    continue
+                refs.append(inp if inp in internal_outputs else input_index[inp])
+            op_program.append({
+                "op": cn.op_type,
+                "attrs": dict(cn.attributes),
+                "inputs": refs,
+                "output": next((out for out in cn.outputs if out), ""),
+            })
 
         fused_id = _generate_fused_node_id("FusedEWChain", "_".join(chain_ops), chain[0])
 
@@ -467,7 +491,11 @@ def fuse_elementwise_chain(graph: Graph, fusion_log: List[Dict[str, Any]]) -> in
             op_type="FusedEWChain",
             inputs=fused_inputs,
             outputs=fused_outputs,
-            attributes={"chain_ops": chain_ops, "chain_node_ids": list(chain)},
+            attributes={
+                "chain_ops": chain_ops,
+                "chain_node_ids": list(chain),
+                "_ops": op_program,
+            },
         )
         graph.add_node(fused_node)
 
@@ -699,12 +727,22 @@ def fuse_residual_norm(graph: Graph, fusion_log: List[Dict[str, Any]]) -> int:
         attrs["ln_epsilon"] = epsilon
         attrs["ln_scale"] = ln_scale
         attrs["ln_bias"] = ln_bias
+        # Use the standard LayerNormalization attribute names as the fused
+        # execution contract; retain ln_* aliases for the fusion log/debugger.
+        attrs["axis"] = axis
+        attrs["epsilon"] = epsilon
+
+        fused_inputs = list(node.inputs)
+        if ln_scale:
+            fused_inputs.append(ln_scale)
+        if ln_bias:
+            fused_inputs.append(ln_bias)
 
         fused_node = Node(
             id=fused_id,
             name=f"fused_residual_norm_{node_id}_{consumer_id}",
             op_type="FusedResidualNorm",
-            inputs=list(node.inputs),  # Preserves residual Add's two inputs
+            inputs=fused_inputs,
             outputs=list(consumer.outputs),
             attributes=attrs,
         )

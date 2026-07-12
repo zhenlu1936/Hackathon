@@ -480,16 +480,25 @@ def op_fused_matmul_bias(inputs: List[np.ndarray], attrs: Dict[str, Any]) -> np.
 
 
 def op_fused_conv_batchnorm(inputs: List[np.ndarray], attrs: Dict[str, Any]) -> np.ndarray:
-    """FusedConv2dBatchNorm: Conv followed by BatchNorm folded at compile time.
-
-    During fusion the BN parameters are folded into the Conv weights,
-    so at runtime this is just a Conv with modified weights/bias.
-    """
+    """Reference execution for fused Conv followed by inference BatchNorm."""
     if len(inputs) < 2:
         raise ValueError("FusedConv2dBatchNorm requires at least X, W inputs")
-    # The fused node should have folded weights via the fusion pass.
-    # Execute as a regular Conv with the fused attributes.
-    return op_conv(inputs, attrs)
+    offset = int(attrs.get("bn_parameter_offset", len(inputs)))
+    conv_out = op_conv(inputs[:offset], attrs)
+    if len(inputs) < offset + 4:
+        raise ValueError("FusedConv2dBatchNorm is missing scale/bias/mean/variance")
+    scale, bias, mean, var = (
+        np.asarray(x, dtype=np.float32) for x in inputs[offset:offset + 4]
+    )
+    epsilon = float(attrs.get("bn_epsilon", 1e-5))
+    channel_shape = [1, -1] + [1] * (conv_out.ndim - 2)
+    scale = scale.reshape(channel_shape)
+    bias = bias.reshape(channel_shape)
+    mean = mean.reshape(channel_shape)
+    var = var.reshape(channel_shape)
+    return ((conv_out - mean) / np.sqrt(var + epsilon) * scale + bias).astype(
+        np.float32, copy=False
+    )
 
 
 def op_fused_ew_chain(inputs: List[np.ndarray], attrs: Dict[str, Any]) -> np.ndarray:

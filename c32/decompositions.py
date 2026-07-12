@@ -111,7 +111,8 @@ def decompose_Gather(node: Node, graph: Graph, precision: PrecisionProfile) -> L
 
 
 def decompose_Constant(node: Node, graph: Graph, precision: PrecisionProfile) -> List[KernelSpecRef]:
-    return [KernelSpecRef(kernel_name="constant", inputs=[], outputs=list(node.outputs))]
+    return [KernelSpecRef(kernel_name="constant", inputs=[], outputs=list(node.outputs),
+                          operator_params=dict(node.attributes))]
 
 
 # ── MatMul / Gemm ─────────────────────────────
@@ -313,7 +314,8 @@ def decompose_GlobalAveragePool(node: Node, graph: Graph, precision: PrecisionPr
     """
     return [
         KernelSpecRef(kernel_name=_kernel_name("reduce_mean", precision),
-                      inputs=list(node.inputs), outputs=list(node.outputs)),
+                      inputs=list(node.inputs), outputs=list(node.outputs),
+                      operator_params={"axes": [-2, -1], "keepdims": True}),
     ]
 
 

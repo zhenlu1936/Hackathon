@@ -17,6 +17,7 @@ class PrecisionProfile:
     compute_dtype: str = "fp32"
     accumulator_dtype: str = "fp32"
     input_dtype: str = "fp32"
+    weight_dtype: Optional[str] = None
     output_dtype: str = "fp32"
 
     def __post_init__(self) -> None:
@@ -25,6 +26,8 @@ class PrecisionProfile:
             val = getattr(self, field_name)
             if val not in valid:
                 raise ValueError(f"Unknown precision '{val}' in {field_name}")
+        if self.weight_dtype is not None and self.weight_dtype not in valid:
+            raise ValueError(f"Unknown precision '{self.weight_dtype}' in weight_dtype")
 
 
 @dataclass
@@ -47,7 +50,7 @@ class KernelTuningParams:
             self.grid_x > 0,
             self.grid_y > 0,
             self.grid_z > 0,
-            self.smem_bytes <= max_smem or self.smem_bytes == -1,
+            self.smem_bytes == -1 or 0 <= self.smem_bytes <= max_smem,
         )
         return all(checks)
 

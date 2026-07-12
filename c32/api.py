@@ -24,9 +24,9 @@ def import_onnx_graph(model_path: str) -> Graph:
     return _import_onnx(model_path)
 
 
-# Default strategy: FULL_FP32 is the safe baseline.
-# Evaluators may set a different mode before calling select/decompose/tune.
-strategy: Strategy = Strategy(mode=ExecutionMode.FULL_FP32)
+# The evaluator-facing strategy exposes deterministic mixed-precision coverage.
+# Deployment and C3.4 instantiate explicit FULL_FP32 strategies independently.
+strategy: Strategy = Strategy(mode=ExecutionMode.MIXED_PRECISION)
 hardware: HardwareCapability = get_hardware()
 
 

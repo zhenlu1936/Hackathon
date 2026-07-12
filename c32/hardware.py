@@ -57,7 +57,10 @@ class HardwareCapability:
 
 
 _default_hardware = HardwareCapability(
-    name="NVIDIA H100 (default)",
+    # Capability-oriented default for the released C3.2 microbenchmark.  It is
+    # not a claim about H100 (which does not natively provide FP4); deployment
+    # must replace this with the organizer/AEC device query.
+    name="AEC mixed-precision profile (unverified)",
     max_threads_per_block=1024,
     max_block_dim=1024,
     max_grid_dim=65535,
@@ -78,5 +81,13 @@ def get_hardware() -> HardwareCapability:
 
 
 def set_hardware(hw: HardwareCapability) -> None:
-    global _default_hardware
-    _default_hardware = hw
+    """Update the active capability snapshot without invalidating references.
+
+    Evaluator modules commonly import ``hardware`` once.  Mutating the shared
+    dataclass keeps those references and already-created default strategies in
+    sync even when callers import this function directly from this module.
+    """
+    if not isinstance(hw, HardwareCapability):
+        raise TypeError("hw must be a HardwareCapability")
+    for field_name in HardwareCapability.__dataclass_fields__:
+        setattr(_default_hardware, field_name, getattr(hw, field_name))

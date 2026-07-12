@@ -104,6 +104,9 @@ class ExecutionScheduler:
         # Step 3: Pre-allocate and upload weights (Feature A)
         self._allocate_weights(lifetimes)
 
+        # Graph inputs also need concrete device storage and an H2D step.
+        self._allocate_inputs(lifetimes)
+
         # Step 4: Allocate intermediates with lifetime reuse (Feature B + C)
         # NOTE: _alloc_map is *not* purged after this step so that
         # _schedule_kernels can look up the bindings for every kernel
@@ -214,7 +217,9 @@ class ExecutionScheduler:
                 try:
                     result.append(int(d))
                 except (ValueError, TypeError):
-                    if isinstance(d, str) and d.lower() in ("n", "batch", "b"):
+                    if isinstance(d, str) and (
+                        d.lower() in ("n", "batch", "b") or d.startswith("unk__")
+                    ):
                         result.append(self.batch_size)
                     else:
                         return []
@@ -311,7 +316,7 @@ class ExecutionScheduler:
             self._alloc_map[tname] = alloc_id
 
             # Create weight-ready event for async prefetch
-            event_id = f"evt_weight_ready_{tname}"
+            event_id = f"evt_wready_{tname}"
             self._event_counter += 1
 
             # Create H2D transfer that signals the event when done
@@ -333,6 +338,38 @@ class ExecutionScheduler:
                 description=f"Weight ready: {tname}",
             )
             self._events.append(evt)
+
+    def _allocate_inputs(self, lifetimes: Dict[str, LifetimeInterval]) -> None:
+        """Allocate graph inputs and create the H2D dependency they require."""
+        for tname, interval in lifetimes.items():
+            if not interval.is_input or interval.size_bytes <= 0:
+                continue
+
+            slot_id = self._pool.alloc(interval.size_bytes)
+            alloc_id = f"alloc_in_{tname}"
+            self._allocations.append(Allocation(
+                alloc_id=alloc_id,
+                tensor_name=tname,
+                slot_id=slot_id,
+                size_bytes=interval.size_bytes,
+            ))
+            self._alloc_map[tname] = alloc_id
+
+            event_id = f"evt_input_ready_{tname}"
+            self._transfers.append(Transfer(
+                kind="H2D",
+                tensor_name=tname,
+                alloc_id=alloc_id,
+                size_bytes=interval.size_bytes,
+                stream_id=COPY_STREAM,
+                event_id=event_id,
+            ))
+            self._events.append(EventDep(
+                event_id=event_id,
+                src_stream=COPY_STREAM,
+                dst_stream=FIRST_COMPUTE_STREAM,
+                description=f"Input ready: {tname}",
+            ))
 
     # ── Step 4: Intermediate allocation (Feature B + C) ────────────
 
@@ -425,6 +462,11 @@ class ExecutionScheduler:
         weight_events: Dict[str, str] = {}  # weight_tensor_name -> event_id
         if self.enable_prefetch:
             weight_events = self._create_weight_events()
+        input_events = {
+            t.tensor_name: t.event_id for t in self._transfers
+            if t.kind == "H2D" and t.tensor_name not in self._weight_slots
+            and t.event_id is not None
+        }
 
         # ── Walk kernel schedule and create KernelSteps ──
         for step_idx, krn in enumerate(self._kernel_schedule):
@@ -450,6 +492,9 @@ class ExecutionScheduler:
                 for inp in krn.inputs:
                     if inp in weight_events:
                         depends_on.append(weight_events[inp])
+            for inp in krn.inputs:
+                if inp in input_events:
+                    depends_on.append(input_events[inp])
 
             # Cross-stream event dependencies (Feature E)
             if self.enable_multi_stream:
@@ -477,6 +522,8 @@ class ExecutionScheduler:
                 step_index=self._step_counter,
                 kernel_name=krn.kernel_name,
                 node_id=node_id,
+                logical_inputs=[name for name in krn.inputs if name],
+                logical_outputs=[name for name in krn.outputs if name],
                 inputs=input_bindings,
                 outputs=output_bindings,
                 stream_id=stream_id,
@@ -619,20 +666,17 @@ class ExecutionScheduler:
         """
         weight_events: Dict[str, str] = {}
 
-        # Group weight tensors by their consumers (layer grouping)
-        for tname, alloc_id in self._weight_slots.items():
-            evt_id = f"evt_wready_{tname}"
+        # Reuse the event signalled by the corresponding H2D transfer.  A
+        # second metadata-only event would leave kernels waiting on an event
+        # that no transfer ever records.
+        transfer_events = {
+            t.tensor_name: t.event_id for t in self._transfers
+            if t.kind == "H2D" and t.tensor_name in self._weight_slots
+            and t.event_id is not None
+        }
+        for tname in self._weight_slots:
+            evt_id = transfer_events[tname]
             weight_events[tname] = evt_id
-
-            # Create event dependency: H2D -> signals event -> kernels wait
-            evt = EventDep(
-                event_id=evt_id,
-                src_stream=COPY_STREAM,       # H2D on copy stream
-                dst_stream=FIRST_COMPUTE_STREAM,  # compute waits
-                description=f"Weight ready for {tname}",
-            )
-            self._events.append(evt)
-            self._event_counter += 1
 
         return weight_events
 

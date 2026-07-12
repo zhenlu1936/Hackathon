@@ -25,6 +25,20 @@ The rubric rewards seeing fp32, fp16, fp8, and fp4, but the end-to-end tolerance
 
 Always retain `FULL_FP32`, which must meet `max_abs_diff <= 1e-3` and `top1_match >= 0.99`.
 
+### Implemented mixed-precision rule table
+
+| Kernel/operator class | Preferred precision | Engineering guard |
+|---|---|---|
+| Softmax, LogSoftmax, LayerNorm, BatchNorm, reductions | FP32 | Numerically sensitive statistics and exponentials |
+| General/spatial Conv | FP16 | FP32 accumulation/output; avoids aggressive quantization of 3x3 transforms |
+| Aligned 1x1 Conv | FP8 | Input/output channels are concrete multiples of 16 |
+| Small or unaligned MatMul/Gemm | FP16 | Safe lower-precision baseline |
+| Aligned MatMul/Gemm | FP8 | `K,N >= 64` and both multiples of 16 |
+| Large constant-weight MatMul/Gemm | W4A16 | `K,N >= 128`, multiples of 32, and `K*N >= 32768`; FP4 weight, FP16 activation, FP32 accumulation/output |
+| Other operators | FP32 | Preserve semantics until a qualified lower-precision implementation exists |
+
+If the preferred precision is unsupported, route deterministically toward safer available types (`fp4 -> fp8 -> fp16/bf16 -> fp32`, for example). No decision uses graph/model names, evaluator identity, hashes, call counts, or mutable coverage state. The public evaluator-facing strategy uses this mixed policy; C3.4 and deployment explicitly construct `FULL_FP32` strategies.
+
 ## D2: kernel sequence completeness (3 points)
 
 Required recognizable sequences include:
@@ -83,6 +97,8 @@ Do not hardcode a high-end GPU profile to claim capabilities. Load the fixed eva
 - Evidence that every emitted kernel name resolves to submitted source and executes through the AEC path.
 - Repeated-call determinism checks for precision, decomposition, and tuning.
 - Offline dependency and originality disclosures for any kernel library or generated implementation.
+
+Current structural evidence: all 13 released sensitive nodes select FP32; all 49 tunable nodes select a declared-supported precision; fp32/fp16/fp8/fp4 all appear; and five independent policy regressions pass. This is routing/decomposition evidence, not proof that FP8/FP4 AEC kernels meet end-to-end accuracy.
 
 ## Open dependency
 

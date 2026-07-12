@@ -33,32 +33,15 @@ from c33.fusion import (
 
 
 def _count_launches(graph: Graph) -> int:
-    """Count estimated kernel launches for a graph.
-
-    Each non-trivial node counts as at least 1 launch.
-    Nodes that decompose into multiple kernels (like Softmax, LayerNorm)
-    count multiple launches.
-    """
-    MULTI_LAUNCH_OPS = {
-        "Softmax": 5,       # reduce_max, sub, exp, reduce_sum, div
-        "LayerNormalization": 8,  # reduce_mean, sub, mul, reduce_mean, add, sqrt, div, mul/add
-        "LayerNorm": 8,
-        "Conv": 3,           # im2col/Winograd, matmul, bias add
-    }
-
+    """Count the kernels emitted by the actual C3.2 lowering."""
+    from c32.strategy import ExecutionMode, Strategy
+    strategy = Strategy(mode=ExecutionMode.FULL_FP32)
     launches = 0
     for nid in graph.node_order:
         node = graph.nodes.get(nid)
         if node is None:
             continue
-        op = node.op_type
-        if op in MULTI_LAUNCH_OPS:
-            launches += MULTI_LAUNCH_OPS[op]
-        elif op.startswith("Fused"):
-            # Fused ops count as a single launch
-            launches += 1
-        else:
-            launches += 1
+        launches += len(strategy.decompose(node, graph))
 
     return max(launches, 1)
 
@@ -172,12 +155,19 @@ class GraphPassPipeline:
         for pass_name, pass_fn in PASS_ORDER:
             if not self.enable_fusion:
                 break
+            snapshot = copy.deepcopy(graph)
+            log_len = len(fusion_log)
             try:
                 n = pass_fn(graph, fusion_log)
+                if self.run_validation:
+                    graph.validate()
                 if n > 0:
                     fusions_per_pattern[pass_name] = n
                     total_fusions += n
             except Exception as exc:
+                graph.__dict__.clear()
+                graph.__dict__.update(snapshot.__dict__)
+                del fusion_log[log_len:]
                 # Log error but continue pipeline
                 fusion_log.append({
                     "pattern": pass_name,
@@ -187,22 +177,6 @@ class GraphPassPipeline:
                     "removed_tensors": [],
                     "rejection_reason": f"Pass raised exception: {exc}",
                 })
-
-            # Validate after each pass
-            if self.run_validation:
-                try:
-                    graph.validate()
-                except ValueError as exc:
-                    fusion_log.append({
-                        "pattern": pass_name,
-                        "status": "validation_error",
-                        "old_node_ids": [],
-                        "new_node_id": "",
-                        "removed_tensors": [],
-                        "rejection_reason": f"Validation failed after pass: {exc}",
-                    })
-                    # Re-throw -- graph is in an invalid state
-                    raise
 
         # Cleanup dead tensors
         if self.enable_dead_cleanup:

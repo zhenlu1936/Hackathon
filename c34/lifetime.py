@@ -31,6 +31,10 @@ def _tensor_size_bytes(
         sz = tensor.size_bytes()
         if sz is not None:
             return sz
+        # ONNX represents a scalar with an empty dimension list.  Constant
+        # scalar outputs still occupy one element on device.
+        if tensor.is_constant and not tensor.shape:
+            return 4
         # Try resolving symbolic dims manually
         if tensor.shape:
             return _compute_size_with_batch(tensor.shape, batch_size)
@@ -50,7 +54,9 @@ def _compute_size_with_batch(
         try:
             total *= int(d)
         except (ValueError, TypeError):
-            if isinstance(d, str) and d.lower() in ("n", "batch", "b"):
+            if isinstance(d, str) and (
+                d.lower() in ("n", "batch", "b") or d.startswith("unk__")
+            ):
                 total *= batch_size
             else:
                 return 0  # unknown symbolic dim

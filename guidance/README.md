@@ -118,6 +118,7 @@ Planning should use the internally consistent written allocation (15 + 25 + 10 =
 ## 8. Guidance files
 
 - [Remaining problems and completion gates](remaining-problems.md)
+- [Fix summary and scoring audit](fix-summary.md)
 - [C3.1 graph parsing](c31-graph-parsing.md)
 - [C3.2 decomposition and kernel selection](c32-decomposition.md)
 - [C3.3 fusion and graph optimization](c33-fusion.md)

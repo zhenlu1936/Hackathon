@@ -154,6 +154,25 @@ def main() -> None:
     print(f"  Parse time:  {info['parse_time_s']:.3f}s", file=sys.stderr)
     print(f"  Infer time:  {info['infer_time_s']:.3f}s", file=sys.stderr)
     print(f"  Total time:  {info['total_time_s']:.3f}s", file=sys.stderr)
+    if info.get("cross_stage_reference"):
+        fusion = info["fusion_stats"]
+        plan = info.get("plan_summary") or {}
+        print("  Backend:     connected C3 CPU reference (not AEC)", file=sys.stderr)
+        print(
+            f"  Fusion:      {fusion['node_count_before']} -> "
+            f"{fusion['node_count_after']} nodes",
+            file=sys.stderr,
+        )
+        print(
+            f"  FP32 check:  max_abs_diff="
+            f"{info['qualification_max_abs_diff']:.6e}",
+            file=sys.stderr,
+        )
+        print(
+            f"  C3.4 plan:   {plan.get('total_kernels', 0)} kernels, "
+            f"{plan.get('total_allocations', 0)} allocations",
+            file=sys.stderr,
+        )
 
     # Compute accuracy if labels are available and model is a classifier
     labels_path = args.labels
