@@ -20,6 +20,7 @@ env/
 *.dag.json
 output/
 *.plan.json
+c35-standard-report*.json
 *.cache
 
 # IDE and editor artifacts
@@ -35,4 +36,3 @@ output/
 
 # Log files
 *.log
-

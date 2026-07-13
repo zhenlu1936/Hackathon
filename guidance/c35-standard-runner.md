@@ -34,7 +34,7 @@ The runner performs one cold subprocess execution per model and:
 - emits a machine-readable JSON report;
 - returns nonzero if any correctness, accuracy, output-contract, command, timeout, or required GPU-evidence check fails.
 
-The normal mode requires NVML to observe GPU memory in the command's process tree. On a disclosed CPU development machine, add `--allow-reference`; the report records that waiver. GPU observation does not by itself prove that the implementation uses the required AEC compiler/runtime, so AEC call-path compliance still requires code review and target-environment evidence.
+The normal mode requires GPU process memory to be observed through `pynvml` or `nvidia-smi`. On a disclosed CPU development machine, add `--allow-reference`; the report records that waiver. GPU observation does not by itself prove that the implementation uses the required AEC compiler/runtime, so AEC call-path compliance still requires code review and target-environment evidence.
 
 The report awards the known 15-point correctness/accuracy gate only when every model and the CuPy preflight pass. Runtime and peak-memory points remain `null` because the written rubric ranks submissions against one another; raw measurements are recorded for that ranking.
 

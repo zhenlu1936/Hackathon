@@ -4,17 +4,17 @@
 This is deliberately separate from ``c35.test_c35``.  It invokes only the
 registered command-line interface, reads the released manifests and thresholds,
 measures cold wall time, validates outputs against golden tensors, computes the
-specified accuracy gate, and samples NVML memory for the process tree when the
-target environment provides ``pynvml``.
+specified accuracy gate, and samples GPU memory for the process tree through
+``pynvml`` or an ``nvidia-smi`` fallback.
 
 Example:
 
     python -m c35.standard_runner \
-      --command 'python -m c35.deploy --onnx {onnx} --input {input} --output {output} --batch-size {batch_size}' \
+      --command 'python -m c35.deploy --onnx {onnx} --input {input} --output {output} --batch-size {batch_size} --backend cupy' \
       --batch-size 256 --report c35-standard-report.json
 
-By default the runner enforces target execution evidence: NVML must be available
-and at least one process in the command tree must use GPU memory.  Use
+By default the runner enforces target execution evidence: GPU process memory
+must be observable and at least one process in the command tree must use it. Use
 ``--allow-reference`` only for disclosed CPU/reference validation.
 """
 
@@ -42,6 +42,7 @@ ROOT = Path(__file__).resolve().parents[1]
 RELEASE = ROOT / ".specification" / "testcases" / "release_to_competitors"
 DEFAULT_MODELS = RELEASE / "models"
 DEFAULT_TESTDATA = RELEASE / "testdata" / "c35"
+EXPECTED_CUPY_VERSION = "14.1.1"
 DEFAULT_COMMAND = (
     f"{shlex.quote(sys.executable)} -m c35.deploy "
     "--onnx {onnx} --input {input} --output {output} "
@@ -80,6 +81,10 @@ def _cupy_preflight() -> Dict[str, Any]:
     try:
         import cupy as cp
 
+        if cp.__version__ != EXPECTED_CUPY_VERSION:
+            raise RuntimeError(
+                f"cupy {cp.__version__} does not match target {EXPECTED_CUPY_VERSION}"
+            )
         device_count = int(cp.cuda.runtime.getDeviceCount())
         if device_count < 1:
             raise RuntimeError("no CUDA device is visible")
@@ -442,7 +447,7 @@ def run_model(model_name: str, command_template: str, models_dir: Path,
             )
             if not result.gpu_evidence_pass:
                 result.errors.append(
-                    "No target GPU process memory was observed through NVML; "
+                    "No target GPU process memory was observed; "
                     "use --allow-reference only for disclosed local reference runs"
                 )
             accuracy_ok = result.accuracy_pass is not False
@@ -492,7 +497,7 @@ def main() -> int:
     parser.add_argument(
         "--allow-reference",
         action="store_true",
-        help="waive NVML/GPU evidence for disclosed CPU reference validation",
+        help="waive GPU-process evidence for disclosed CPU reference validation",
     )
     parser.add_argument(
         "--skip-cupy-preflight",
@@ -530,7 +535,11 @@ def main() -> int:
     for result in results:
         _print_result(result)
     all_models_passed = all(result.passed for result in results)
-    score_eligible = not args.allow_reference and preflight["passed"]
+    score_eligible = (
+        not args.allow_reference
+        and preflight["passed"]
+        and not preflight.get("skipped", False)
+    )
     gate_points = 15 if score_eligible and all_models_passed else 0
     report = {
         "format_version": "1.0",

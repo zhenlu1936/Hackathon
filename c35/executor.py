@@ -78,9 +78,9 @@ class GraphExecutor:
 
     Attributes:
         graph: The parsed computation graph IR.
-        weights: Dict of initializer name -> numpy array.
-        constants: Dict of constant output name -> numpy array.
-        values: Dict of tensor name -> numpy array (current inference state).
+        weights: Dict of initializer name -> backend array.
+        constants: Dict of constant output name -> backend array.
+        values: Dict of tensor name -> backend array (current inference state).
     """
 
     def __init__(self, graph: Graph, model_path: str):
@@ -109,7 +109,7 @@ class GraphExecutor:
                        Keys must match graph.inputs tensor names.
 
         Returns:
-            Dict mapping graph output name -> numpy array.
+            Dict mapping graph output name -> backend array.
         """
         # Initialize with inputs and weights
         self.values.clear()
@@ -511,14 +511,13 @@ def load_and_infer(
         batch_outputs = executor.run(batch_feed)
         all_outputs.append(batch_outputs[output_name])
 
-    t_infer_end = time.perf_counter()
-
     # 6. Concatenate outputs
     final_device_output = engine.array_module().concatenate(all_outputs, axis=0)
     final_device_output = engine.ascontiguousarray(
         final_device_output, dtype=engine.array_module().float32
     )
     engine.synchronize()
+    t_infer_end = time.perf_counter()
     final_output = np.ascontiguousarray(engine.to_host(final_device_output))
 
     # 7. Validate output

@@ -660,11 +660,11 @@ def execute_op(op_type: str, inputs: List[xp.ndarray],
 
     Args:
         op_type: The ONNX operator type (e.g., "Conv", "Gemm").
-        inputs: List of input numpy arrays.
+        inputs: List of input arrays from the configured backend.
         attrs: Node attributes dict.
 
     Returns:
-        A numpy array, or a list of numpy arrays (for Split).
+        A backend array, or a list of backend arrays (for Split).
     """
     impl = OP_DISPATCH.get(op_type)
     if impl is None:

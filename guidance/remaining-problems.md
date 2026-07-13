@@ -89,7 +89,7 @@ The CuPy path is now the default connected reference: weights, constants, batche
 
 Remaining work:
 
-- Replace high-level planned NumPy node execution with the individual C3.2 kernel steps and physical bindings on AEC.
+- Replace high-level planned array-operator execution with the individual C3.2 kernel steps and physical bindings on AEC.
 - Preserve required intermediate dtypes and represent omitted optional inputs explicitly instead of scalar FP32 zero.
 - Test non-default attributes and hidden valid shapes for all operators.
 - Measure cold time and NVML per-process peak GPU memory on the target.
@@ -118,7 +118,8 @@ The local macOS ARM environment is not evidence of parity with the specified Lin
 - Independent scoring regressions: 4/4 pass.
 - Cross-stage tests: 2/2 pass, covering all public models plus rejection of a plan/graph mismatch.
 - Complete golden CLI tests for MLP, ResNet, and Transformer pass through the connected reference path (187.041 seconds locally).
-- The standards-oriented black-box runner passes all released models in explicit reference mode: MLP 0.252s/0.9835 accuracy, ResNet 117.556s/0.9351 accuracy, Transformer 82.548s; all precision gates pass. Target NVML/AEC evidence remains unavailable locally.
+- The revised standards-oriented runner passes all released models in explicit NumPy reference mode: MLP 0.185s/0.9835 accuracy, ResNet 107.247s/0.9351 accuracy, Transformer 82.338s; all precision gates pass. CuPy 14.1.1, GPU-memory sampling, and AEC execution still require target-server validation.
+- Default CuPy mode fails closed when CuPy or a CUDA device is unavailable; there is no silent NumPy fallback.
 
 These positives do not override unresolved AEC, numerical-gate, reduction, runtime, or compliance items.
 
