@@ -233,32 +233,84 @@ class NvmlProcessTreeSampler:
     def _sample(self) -> None:
         pids = _descendants(self.root_pid)
         if self._mode == "nvidia-smi":
+            total_mib = 0
+            observed = False
+            # On MIG setups the global query may miss processes; enumerate
+            # individual GPU / MIG compute-instance indexes and query each one.
             try:
-                completed = subprocess.run(
-                    [
-                        "nvidia-smi",
-                        "--query-compute-apps=pid,used_gpu_memory",
-                        "--format=csv,noheader,nounits",
-                    ],
+                gpu_list = subprocess.run(
+                    ["nvidia-smi", "--query-gpu=index", "--format=csv,noheader"],
                     capture_output=True,
                     text=True,
                     timeout=max(1.0, self.interval_s * 5),
                     check=False,
                 )
-                total_mib = 0
-                observed = False
-                for line in completed.stdout.splitlines():
-                    fields = [field.strip() for field in line.split(",")]
-                    if len(fields) != 2:
-                        continue
-                    pid, used_mib = int(fields[0]), int(fields[1])
-                    if pid in pids:
-                        total_mib += used_mib
-                        observed = True
-                self.process_observed = self.process_observed or observed
-                self.peak_bytes = max(self.peak_bytes, total_mib * 1024 * 1024)
+                gpu_indexes = [
+                    int(line.strip()) for line in gpu_list.stdout.splitlines()
+                    if line.strip().isdigit()
+                ]
             except (OSError, ValueError, subprocess.SubprocessError):
-                pass
+                gpu_indexes = []
+            # Build a list of queries to try: global, per-GPU, MIG-aware.
+            queries: List[List[str]] = [
+                ["nvidia-smi", "--query-compute-apps=pid,used_gpu_memory",
+                 "--format=csv,noheader,nounits"],
+            ]
+            for idx in gpu_indexes:
+                queries.append([
+                    "nvidia-smi", "-i", str(idx),
+                    "--query-compute-apps=pid,used_gpu_memory",
+                    "--format=csv,noheader,nounits",
+                ])
+            # MIG-aware fallback: use --query-accounted-apps which may report
+            # processes that --query-compute-apps misses on MIG slices.
+            queries.append([
+                "nvidia-smi", "--query-accounted-apps=pid,used_gpu_memory",
+                "--format=csv,noheader,nounits",
+            ])
+            for query_cmd in queries:
+                try:
+                    completed = subprocess.run(
+                        query_cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=max(1.0, self.interval_s * 5),
+                        check=False,
+                    )
+                    for line in completed.stdout.splitlines():
+                        fields = [field.strip() for field in line.split(",")]
+                        if len(fields) != 2:
+                            continue
+                        try:
+                            pid, used_mib = int(fields[0]), int(fields[1])
+                        except ValueError:
+                            continue
+                        if pid in pids:
+                            total_mib += used_mib
+                            observed = True
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    pass
+            # Fallback: if PID-based tracking found nothing but the GPU is
+            # clearly active (non-zero total memory), record the total used
+            # memory as a lower-confidence signal.
+            if not observed:
+                try:
+                    mem = subprocess.run(
+                        ["nvidia-smi", "--query-gpu=memory.used",
+                         "--format=csv,noheader,nounits"],
+                        capture_output=True,
+                        text=True,
+                        timeout=max(1.0, self.interval_s * 5),
+                        check=False,
+                    )
+                    for line in mem.stdout.splitlines():
+                        line = line.strip()
+                        if line.isdigit():
+                            total_mib = max(total_mib, int(line))
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    pass
+            self.process_observed = self.process_observed or observed
+            self.peak_bytes = max(self.peak_bytes, total_mib * 1024 * 1024)
             return
         total = 0
         observed = False
@@ -481,6 +533,15 @@ def _print_result(result: ModelResult) -> None:
     if result.errors:
         for error in result.errors:
             print(f"  error:           {error}")
+    # Surface stderr tail for crash diagnostics
+    if not result.passed and result.stderr_tail:
+        print(f"  stderr (tail):")
+        for line in result.stderr_tail.strip().splitlines():
+            print(f"    {line}")
+    if not result.passed and result.stdout_tail:
+        print(f"  stdout (tail):")
+        for line in result.stdout_tail.strip().splitlines():
+            print(f"    {line}")
 
 
 def main() -> int:
