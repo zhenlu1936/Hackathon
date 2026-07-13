@@ -315,23 +315,20 @@ class C35OperatorTests(unittest.TestCase):
         self.assertEqual(out[1].shape, (1, 18, 128))
         self.assertEqual(out[2].shape, (1, 18, 128))
 
-    def test_split_materializes_backend_indices(self) -> None:
+    def test_split_uses_python_integer_boundaries(self) -> None:
         import c35.engine as engine
 
         original_xp = engine.xp
 
         class StrictArrayModule:
-            int64 = np.int64
             float32 = np.float32
 
             @staticmethod
-            def asarray(value, dtype=None):
-                return np.asarray(value, dtype=dtype)
-
-            @staticmethod
             def split(value, indices, axis=0):
-                if not isinstance(indices, np.ndarray):
-                    raise TypeError("indices must be a backend ndarray")
+                if not isinstance(indices, list) or not all(
+                    type(index) is int for index in indices
+                ):
+                    raise TypeError("indices must be Python integers")
                 return np.split(value, indices, axis=axis)
 
         try:

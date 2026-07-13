@@ -424,9 +424,14 @@ def op_split(inputs: List[xp.ndarray], attrs: Dict[str, Any]) -> List[xp.ndarray
         size_per = x.shape[axis] // num_outputs
         split_sizes = [size_per] * num_outputs
 
-    # CuPy deliberately requires an ndarray here, while NumPy also accepts a
-    # Python list.  Materialize backend-native split points for both paths.
-    indices = xp.asarray(split_sizes, dtype=xp.int64).cumsum()[:-1]
+    # CuPy 14.1.1 requires ordinary Python integer boundaries here: passing a
+    # CuPy ndarray makes its split routine treat the array as a scalar section
+    # count.  Compute the tiny metadata list on the host without a GPU roundtrip.
+    indices: List[int] = []
+    boundary = 0
+    for size in split_sizes[:-1]:
+        boundary += int(size)
+        indices.append(boundary)
     results = xp.split(x, indices, axis=axis)
     return [r.astype(xp.float32, copy=False) for r in results]
 

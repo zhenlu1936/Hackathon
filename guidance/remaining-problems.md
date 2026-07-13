@@ -120,7 +120,7 @@ The local macOS ARM environment is not evidence of parity with the specified Lin
 - Complete golden CLI tests for MLP, ResNet, and Transformer pass through the connected reference path (187.041 seconds locally).
 - The revised standards-oriented runner passes all released models in explicit NumPy reference mode: MLP 0.185s/0.9835 accuracy, ResNet 107.247s/0.9351 accuracy, Transformer 82.338s; all precision gates pass. CuPy 14.1.1, GPU-memory sampling, and AEC execution still require target-server validation.
 - Default CuPy mode fails closed when CuPy or a CUDA device is unavailable; there is no silent NumPy fallback.
-- First H200 MIG run confirmed CuPy 14.1.1 and numerical gates for MLP (`0.9835`, max diff `1.53e-05`) and ResNet (`0.9351`, max diff `8.58e-06`). It exposed two portability defects: CuPy `Split` rejected Python-list `cumsum`, and MIG hid per-process memory from `nvidia-smi`. The implementation now materializes backend-native split indices and accepts structured nonzero CuPy-pool evidence as a documented lower-confidence memory fallback. A second server run is required to validate Transformer and the new evidence path.
+- H200 MIG runs confirmed CuPy 14.1.1, CuPy-pool evidence, and numerical gates for MLP (`0.9835`, max diff `1.53e-05`) and ResNet (`0.9351`, max diff `8.58e-06`). They exposed CuPy 14.1.1's asymmetric `Split` contract: `cumsum` rejects Python lists, while `split` rejects CuPy boundary arrays. The implementation now computes cumulative boundaries directly as Python integers and passes that list to `split`. A further server run is required to validate Transformer end to end.
 
 These positives do not override unresolved AEC, numerical-gate, reduction, runtime, or compliance items.
 
