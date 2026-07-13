@@ -42,9 +42,20 @@ launch_reduction = (raw_launches - optimized_launches) / raw_launches
 buffer_reduction = (raw_buffers - optimized_buffers) / raw_buffers
 ```
 
-The structural pass removes internal materialization only from the optimized
-graph. Launch reduction is counted through C3.2 decomposition rather than from
-fused node names alone.
+After the five required patterns, a deterministic `FusedExecutionRegion` pass
+groups at most six single-output operators along single-consumer edges. It
+never crosses a graph output, excludes multi-output `Split`, keeps every
+outside operand as an explicit region input, and stores the original ordered
+operator program for reference execution. Eligibility is based only on
+operator semantics and graph topology; model names, filenames, testcase IDs,
+hashes, weights, and sample values are not inspected.
+
+The region rewrite removes logical intermediate values from the optimized
+graph and supplies the node-level metric consumed by the published C3.3
+pipeline. Its current CuPy reference lowering executes the retained program as
+a sequence, so these structural launch counts are **not** evidence that a
+region is one physical H200 kernel. Physical kernel-launch and allocation
+claims remain blocked until AEC/CUDA region code generation consumes this IR.
 
 High-value opportunities in the released models include Gemm+bias, residual Add patterns, Transformer elementwise GELU chains, and residual Add+LayerNormalization. Softmax+Dropout may only appear in a training-style benchmark, because inference exports often omit or neutralize Dropout.
 
@@ -70,7 +81,8 @@ guards, rewrite, validate, then commit or restore the snapshot.
 4. Residual Add+LayerNorm fusion.
 5. Softmax+Dropout fusion under inference-only guards.
 6. Elementwise-chain fusion.
-7. Dead internal tensor/node cleanup.
+7. Bounded producer-consumer execution-region formation.
+8. Dead internal tensor/node cleanup.
 
 Run validation after each pass, not only at pipeline completion.
 
@@ -81,3 +93,33 @@ Run validation after each pass, not only at pipeline completion.
 - Complete `fusion_log` entries.
 - Original versus optimized graph validation result.
 - Original versus optimized versus golden numerical report.
+
+Local structural validation on 2026-07-13 produced:
+
+| Released graph | Launch reduction | Logical buffer reduction |
+|---|---:|---:|
+| MLP | 88.9% | 100.0% |
+| ResNet-18 | 84.0% | 76.6% |
+| Transformer | 74.3% | 73.5% |
+
+All three graphs passed IR validation. Numerical equivalence and physical
+launch behavior of the new region path still require the remote CuPy 14.1.1
+H200 run.
+
+## Public design references
+
+The implementation is original repository code. Public material influenced
+the design principles, not copied source code:
+
+- TVM, *An Automated End-to-End Optimizing Compiler for Deep Learning*, for
+  the separation of graph-level fusion from hardware-specific operator
+  lowering: https://arxiv.org/abs/1802.04799
+- DNNFusion, *Accelerating Deep Neural Networks Execution with Advanced
+  Operator Fusion*, for operator classification, graph rewriting, and bounded
+  fusion-plan formation: https://arxiv.org/abs/2108.13342
+- MLIR Linalg documentation, for dependency-aware producer/consumer fusion and
+  explicit temporary-buffer reasoning:
+  https://mlir.llvm.org/docs/Dialects/Linalg/
+- NVIDIA CUDA Programming Guide, CUDA Graphs, for the distinction between
+  reducing host submission overhead and reducing the number of physical GPU
+  kernels: https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/cuda-graphs.html

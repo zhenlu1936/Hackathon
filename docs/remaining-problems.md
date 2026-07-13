@@ -1,8 +1,8 @@
 # Known limitations and completion gates
 
-Updated: 2026-07-13 (CuPy-only synchronization) — resolved #11, #28, #29,
-#35, #37; submission items #10 and #41–45 remain open; added #46 for mandatory
-H200 validation of the revised runtime
+Updated: 2026-07-13 (cleanup and scoring audit) — the published structural
+threshold in #5 remains resolved; #2 is reopened until the corrected FULL_FP32
+gate runs on H200; physical region lowering remains #27
 
 This release register follows `.specification/general_requirements.md` first and
 `.specification/scoring.md` second. A check closes a scoring item only when it
@@ -13,15 +13,15 @@ exercises the same artifact and backend evaluated by the organizer.
 | # | Priority | Area | Remaining problem | Scoring consequence |
 |---|----------|------|-------------------|--------------------|
 | 1 | P0 | Architecture | C3.2 kernel steps and C3.4 plan operations do not directly drive H200 execution | C3.2/C3.4 implementation claims remain partly structural |
-| 2 | P0 | Correctness | No FULL_FP32 execution of the decomposed C3.2 kernel sequence against golden outputs | C3.2 hard numerical condition is unproven |
+| 2 | P0 | Correctness | The corrected FULL_FP32 H200 gate exists but has not run after bounded-region fusion; it now checks `max_abs_diff <= 1e-3` and `top1_match >= 0.99` without adding a sixteenth C3.2 point | C3.2 hard numerical condition remains unproven |
 | 3 | P1 | C3.2 precision | Mixed routing covers four precisions structurally, but FP8/FP4 H200 kernels are not numerically qualified | D1 routing signals pass; low-precision correctness remains unproven |
 | 4 | P1 | C3.2 hardware | Default target is an unverified capability profile rather than an AEC query | Capability and D5 claims may be false |
-| 5 | P1 | C3.3 reduction | Public launch/buffer reductions are below 60% | F2/F3 cannot receive full credit |
+| 5 | ~~P1~~ | ~~C3.3 structural reduction~~ | Bounded, topology-driven execution regions exceed the published 60% launch/logical-buffer thresholds on all three released graphs | ~~F2/F3 structural threshold unmet~~ → Resolved locally; not physical H200-launch evidence |
 | 6 | P1 | C3.3 correctness | Earlier H200 runs passed MLP and ResNet, but the CuPy-only revision has not been rerun; BN values cannot be reconstructed and fused nodes are not single fused H200 kernels | F4/backend launch evidence is incomplete |
 | 7 | P1 | C3.4 runtime | Allocations, copies, streams, and events are metadata rather than the operations driving CuPy | Code-review complete-chain condition is unmet |
 | 8 | P1 | C3.4 concurrency | Linear lifetime reuse ignores stream happens-before; plan has separate transfer/kernel lists | Reuse safety and prefetch overlap are unproven |
 | 9 | P1 | C3.5 integration | CuPy executes on the AEC H200 but evaluates high-level nodes instead of C3.2 kernel steps | End-to-end device execution works; compiler-plan integration remains incomplete |
-| 10 | P0 | Submission | Direct `google.protobuf` and OpenAI Codex assistance are not completely verified and disclosed; archive cleanliness is not proven | Integrity Rule 6 and submission reproducibility remain release blockers |
+| 10 | P0 | Submission | Direct `google.protobuf` native-server verification and archive cleanliness are not proven | Dependency/reproducibility portions of Integrity Rule 6 remain release blockers; source and AI disclosures are current |
 | 12 | P2 | Evaluator API | Referenced C3.2/C3.3 benchmark is absent | Hidden API compatibility is unknown |
 | 46 | P0 | C3.5 validation | The revised CuPy-only CLI, runner, serialization, and tests have not run on the remote H200 | Current end-to-end correctness and performance are unproven |
 
@@ -66,16 +66,20 @@ The C3.2 smoke script now prints `14.17/15`: D1 is 3.0/3.0 with fp32/fp16/fp8/fp
 
 | Model | Launch reduction | Buffer reduction | 60% target met? |
 |---|---:|---:|---|
-| MLP | 44.4% (+44pp) | 40.0% | No |
-| ResNet-18 | 38.7% (+28pp) | 36.2% | No |
-| Transformer | 18.2% | 27.9% | No |
+| MLP | 88.9% | 100.0% | Yes (structural) |
+| ResNet-18 | 84.0% | 76.6% | Yes (structural) |
+| Transformer | 74.3% | 73.5% | Yes (structural) |
+
+These values are the published C3.3 graph-level metrics. The CuPy reference
+lowering executes each retained region program operation by operation; it does
+not yet establish one physical H200 kernel per region.
 
 Required work:
 
 25. Retain initializer payloads or add an initializer store so Conv+BN actually folds weights/bias.
 26. Extend first-batch original-versus-optimized qualification to the decomposed H200 kernel path; any violation makes F4 zero.
 27. Lower every fused node to one real H200 kernel or a truthful executable sequence. A fused label alone is not a saved launch.
-28. ~~Improve general fusion/lowering toward the 60% F2/F3 targets~~ → Added `FusedComputeActivation`; MLP now 44%, ResNet 39%. Transformer Erf is inside EWChains so was not improved.
+28. ~~Improve general fusion/lowering toward the 60% F2/F3 structural targets~~ → Resolved with deterministic bounded execution regions; MLP 88.9%/100.0%, ResNet 84.0%/76.6%, Transformer 74.3%/73.5% launch/logical-buffer reduction.
 29. ~~Cap and repair self-test arithmetic; `9.40/8.6` is invalid~~ → Resolved.
 
 ## C3.4 runtime integration
@@ -122,10 +126,11 @@ Before submission, provide:
 42. Complete exact versions, licenses, purposes, and call boundaries for all
     used modules. The server-native `nvidia-smi` boundary is now recorded; do
     not infer an exact CuPy distribution name from the importable module alone.
-43. Review the academic-attribution draft in `docs/SUBMISSION.md` against the
-    actual implementation and disclose every public source that influenced it.
-44. Expand the LLM-assistance disclosure to include OpenAI Codex as well as
-    GitHub Copilot, and keep it current after later assisted revisions.
+43. ~~Review academic/public-source attribution against the implementation~~ →
+    Resolved for this revision: ONNX, Abramowitz & Stegun, TVM, DNNFusion,
+    MLIR Linalg, and NVIDIA CUDA Graphs are disclosed.
+44. ~~Disclose OpenAI Codex as well as GitHub Copilot~~ → Resolved; keep the
+    disclosure current after every later assisted revision.
 45. Build the actual submission archive and inspect its file list for virtual
     environments, caches, bytecode, reports, generated plans/outputs,
     `.agents`, `.specification`, and development-only assets. `.gitignore` is
@@ -137,7 +142,9 @@ The local macOS ARM environment is not evidence of parity with the specified Lin
 
 - C3.1: 7/7 tests pass.
 - C3.2: structural script completes at 14.17/15; D1 is 3.0/3.0; five precision-policy and four independent scoring regressions pass.
-- C3.3: 51 structural checks pass; independent EW-chain and Conv+BN numerical regressions pass.
+- C3.3: 64 structural checks pass, including the bounded-region ABI and
+  released-graph threshold evidence; independent EW-chain and Conv+BN
+  numerical regressions are historical until rerun on H200.
 - C3.4: 505 structural checks pass; all 12 public plan configurations validate; readiness waits use signalled transfer events.
 - The earlier independent scoring and cross-stage regressions are historical;
   their CuPy conversions require issue 46's H200 validation.
@@ -147,7 +154,7 @@ The local macOS ARM environment is not evidence of parity with the specified Lin
 - Pre-conversion H200 MIG runs confirmed CuPy 14.1.1, CuPy-pool evidence, and numerical gates for MLP (`0.9835`, max diff `1.53e-05`) and ResNet (`0.9351`, max diff `8.58e-06`). They exposed CuPy 14.1.1's asymmetric `Split` contract. These results are historical evidence only; issue 46 requires a fresh three-model run of the revised framework.
 
 These positives do not override unresolved kernel-plan integration,
-low-precision qualification, reduction, Transformer H200 validation, or
+low-precision qualification, physical H200 fusion, Transformer H200 validation, or
 submission-compliance items.
 
 ## Organizer questions

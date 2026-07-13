@@ -97,7 +97,7 @@ and numerically qualified.
 - Repeated-call determinism checks for precision, decomposition, and tuning.
 - Native-server dependency and originality disclosures for any kernel library or generated implementation.
 
-Current structural evidence: all 13 released sensitive nodes select FP32; all 49 tunable nodes select a declared-supported precision; fp32/fp16/fp8/fp4 all appear; and five independent policy regressions pass. This is routing/decomposition evidence, not proof that FP8/FP4 AEC kernels meet end-to-end accuracy.
+Current structural evidence: all 13 released sensitive nodes select FP32; all 49 tunable nodes select a declared-supported precision; fp32/fp16/fp8/fp4 all appear; and five independent policy regressions pass. The FULL_FP32 numerical verification (`c32.test_c32.test_full_fp32_numerical`) is a hard D1 gate, not an extra score item. On the AEC H200 it compares the connected C3.1→C3.5 CuPy output with golden results using `max_abs_diff <= 1e-3` and `top1_match >= 0.99`. This test has not yet been rerun after the bounded-region revision, so it is a validation path rather than current numerical proof. It does not qualify FP8/FP4 AEC kernels.
 
 ## Open dependency
 

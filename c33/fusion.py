@@ -25,6 +25,23 @@ ELEMENTWISE_ARITH_OPS: Set[str] = {
     "Add", "Sub", "Mul", "Div",
 }
 
+# Operators supported by the C3.5 reference executor that have one data output
+# in the released opset-17 contract.  Constant is deliberately excluded (it is
+# a region input/source), as is Split (multiple outputs require a different
+# region ABI).  This classification is semantic and independent of graph,
+# model, node, or testcase names.
+REGION_OPS: Set[str] = {
+    "Flatten", "Gemm", "Relu", "Conv", "Add", "GlobalAveragePool",
+    "Gather", "LayerNormalization", "LayerNorm", "MatMul", "Reshape",
+    "Transpose", "Div", "Softmax", "Erf", "Mul", "Sub", "Sqrt", "Exp",
+    "FusedMatMulBias", "FusedConv2dBatchNorm", "FusedEWChain",
+    "FusedSoftmaxDropout", "FusedResidualNorm", "FusedComputeActivation",
+}
+
+# A bounded region avoids turning an entire model into an opaque mega-node and
+# leaves a practical unit for later hardware-specific lowering and tuning.
+MAX_REGION_NODES = 6
+
 # ── Helper utilities ───────────────────────────────────────────────
 
 
@@ -899,6 +916,160 @@ def fuse_compute_activation(graph: Graph, fusion_log: List[Dict[str, Any]]) -> i
             "rejection_reason": "",
         })
 
+    return fusions
+
+
+# ── General bounded producer-consumer regions ──────────────────────────────
+
+
+def _walk_fusible_region(graph: Graph, start_id: str,
+                         claimed: Set[str]) -> List[str]:
+    """Return a deterministic, dependency-safe linear execution region.
+
+    Every internal value has exactly one active consumer and is not a graph
+    output.  A consumer may have additional operands from outside the region;
+    those values become explicit fused-node inputs.  Multi-output nodes are
+    excluded because their externally visible ABI cannot be represented by
+    this pass without additional alias/result bookkeeping.
+    """
+    region: List[str] = []
+    current_id = start_id
+    graph_outputs = {tensor.name for tensor in graph.outputs}
+
+    while len(region) < MAX_REGION_NODES:
+        if current_id in claimed or current_id in region:
+            break
+        node = graph.nodes.get(current_id)
+        if node is None or node.op_type not in REGION_OPS:
+            break
+        outputs = [out for out in node.outputs if out]
+        if len(outputs) != 1:
+            break
+
+        region.append(current_id)
+        output = outputs[0]
+        if output in graph_outputs:
+            break
+        consumers = _get_consumers(graph, output)
+        if len(consumers) != 1:
+            break
+        next_id = consumers[0]
+        next_node = graph.nodes.get(next_id)
+        if (next_node is None or next_id in claimed or
+                next_node.op_type not in REGION_OPS or
+                len([out for out in next_node.outputs if out]) != 1):
+            break
+        current_id = next_id
+
+    return region
+
+
+def fuse_execution_regions(graph: Graph,
+                           fusion_log: List[Dict[str, Any]]) -> int:
+    """Fuse bounded single-consumer regions while preserving executable IR.
+
+    The fused node carries an ordered, self-contained operator program.  C3.5
+    can therefore execute the exact original operations for correctness
+    qualification while a later AEC/CUDA lowering may replace the region with
+    a genuinely fused kernel.  This pass makes no model-specific decisions.
+    """
+    if not graph.node_order:
+        graph.topological_sort()
+
+    candidates: List[List[str]] = []
+    claimed: Set[str] = set()
+    for node_id in list(graph.node_order):
+        if node_id in claimed:
+            continue
+        region = _walk_fusible_region(graph, node_id, claimed)
+        if len(region) < 2:
+            continue
+        candidates.append(region)
+        claimed.update(region)
+
+    fusions = 0
+    for region in candidates:
+        if any(node_id not in graph.nodes for node_id in region):
+            continue
+        nodes = [graph.nodes[node_id] for node_id in region]
+        internal_outputs = {
+            output for node in nodes for output in node.outputs if output
+        }
+        external_inputs: List[str] = []
+        for node in nodes:
+            for input_name in node.inputs:
+                if (input_name and input_name not in internal_outputs and
+                        input_name not in external_inputs):
+                    external_inputs.append(input_name)
+
+        input_index = {name: index for index, name in enumerate(external_inputs)}
+        program: List[Dict[str, Any]] = []
+        for node in nodes:
+            refs: List[Any] = []
+            for input_name in node.inputs:
+                if not input_name:
+                    refs.append(None)
+                elif input_name in internal_outputs:
+                    refs.append(input_name)
+                else:
+                    refs.append(input_index[input_name])
+            program.append({
+                "op": node.op_type,
+                "attrs": dict(node.attributes),
+                "inputs": refs,
+                "outputs": [output for output in node.outputs if output],
+            })
+
+        final_outputs = [output for output in nodes[-1].outputs if output]
+        fused_id = _generate_fused_node_id(
+            "FusedExecutionRegion", region[0], region[-1]
+        )
+        suffix = 1
+        base_id = fused_id
+        while fused_id in graph.nodes:
+            fused_id = f"{base_id}_{suffix}"
+            suffix += 1
+
+        for output in final_outputs:
+            graph.tensor_producer.pop(output, None)
+        for node_id in region:
+            graph.remove_node(node_id)
+
+        fused_node = Node(
+            id=fused_id,
+            name=f"fused_execution_region_{region[0]}_{region[-1]}",
+            op_type="FusedExecutionRegion",
+            inputs=external_inputs,
+            outputs=final_outputs,
+            attributes={
+                "_region_ops": program,
+                "_region_node_ids": list(region),
+                "_region_size": len(region),
+            },
+        )
+        graph.add_node(fused_node)
+        for input_name in external_inputs:
+            graph.add_consumer(input_name, fused_id)
+        for output in final_outputs:
+            if output not in graph.tensors:
+                graph.register_tensor(name=output)
+            graph.set_producer(output, fused_id)
+
+        fusions += 1
+        fusion_log.append({
+            "pattern": "FusedExecutionRegion",
+            "status": "fused",
+            "old_node_ids": list(region),
+            "new_node_id": fused_id,
+            "removed_tensors": sorted(
+                output for output in internal_outputs
+                if output not in final_outputs
+            ),
+            "rejection_reason": "",
+        })
+
+    if fusions:
+        graph.topological_sort()
     return fusions
 
 

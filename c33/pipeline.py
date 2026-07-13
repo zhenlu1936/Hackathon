@@ -25,6 +25,7 @@ from c33.fusion import (
     fuse_softmax_dropout,
     fuse_residual_norm,
     fuse_compute_activation,
+    fuse_execution_regions,
     cleanup_dead_tensors,
     ELEMENTWISE_OPS,
 )
@@ -86,6 +87,7 @@ PASS_ORDER = [
     ("ResidualNorm", fuse_residual_norm),
     ("SoftmaxDropout", fuse_softmax_dropout),
     ("EWChain", fuse_elementwise_chain),
+    ("ExecutionRegion", fuse_execution_regions),
 ]
 
 

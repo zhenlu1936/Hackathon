@@ -23,6 +23,7 @@ from c33.fusion import (
     fuse_elementwise_chain,
     fuse_softmax_dropout,
     fuse_residual_norm,
+    fuse_execution_regions,
     cleanup_dead_tensors,
 )
 
@@ -654,6 +655,10 @@ def test_real_models() -> float:
             check(stats["validation_passed"], f"{model_name}: validation passed", 0.1)
             check(stats["node_count_after"] <= node_count_before,
                   f"{model_name}: nodes not increased", 0.1)
+            check(stats["launch_reduction"] >= 0.60,
+                  f"{model_name}: structural launch reduction reaches 60%")
+            check(stats["buffer_reduction"] >= 0.60,
+                  f"{model_name}: logical buffer reduction reaches 60%")
 
             score += 0.2
         except Exception as e:
@@ -744,6 +749,47 @@ def test_graph_invariants() -> float:
     return score
 
 
+def test_execution_regions() -> None:
+    """Validate bounded-region ABI, external operands, and determinism."""
+    print("\n--- Bounded execution regions ---")
+    g = _simple_graph()
+    for name in ("bias", "scale"):
+        g.register_tensor(name, shape=[4], is_initializer=True)
+        g.tensor_producer[name] = "INITIALIZER"
+
+    specs = [
+        ("relu", "Relu", ["input"], "relu_out"),
+        ("add", "Add", ["relu_out", "bias"], "add_out"),
+        ("mul", "Mul", ["add_out", "scale"], "output"),
+    ]
+    for node_id, op_type, inputs, output in specs:
+        g.add_node(Node(id=node_id, name=node_id, op_type=op_type,
+                        inputs=inputs, outputs=[output]))
+        g.register_tensor(output, shape=["batch", 4])
+        g.set_producer(output, node_id)
+        for input_name in inputs:
+            g.add_consumer(input_name, node_id)
+    g.topological_sort()
+
+    log: List[Dict[str, Any]] = []
+    count = fuse_execution_regions(g, log)
+    check(count == 1, "Three-node region fused once")
+    region = next(iter(g.nodes.values()))
+    check(region.op_type == "FusedExecutionRegion",
+          "Region node uses executable-region ABI")
+    check(region.inputs == ["input", "bias", "scale"],
+          "External operands remain explicit and ordered")
+    check(region.outputs == ["output"], "Graph output is preserved")
+    check([op["op"] for op in region.attributes["_region_ops"]] ==
+          ["Relu", "Add", "Mul"], "Original operator order is retained")
+    check(region.attributes["_region_size"] <= 6, "Region size is bounded")
+    try:
+        g.validate()
+        check(True, "Region graph validates")
+    except ValueError as exc:
+        check(False, f"Region graph validation failed: {exc}")
+
+
 # ── Main ──────────────────────────────────────────────────────────────
 
 
@@ -796,6 +842,7 @@ def main() -> int:
     test_real_models()
     test_counting()
     test_graph_invariants()
+    test_execution_regions()
 
     print_summary()
     return 0 if FAIL == 0 else 1

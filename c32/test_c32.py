@@ -19,7 +19,16 @@ from c3common.ir.graph import Graph, Node
 from c32.api import strategy, hardware
 from c32.hardware import HardwareCapability, set_hardware
 from c32.kernel_spec import PrecisionProfile, KernelSpecRef, KernelTuningParams
-from c32.strategy import SENSITIVE_OPS, TUMABLE_OPS
+from c32.strategy import ExecutionMode, SENSITIVE_OPS, TUMABLE_OPS
+
+# CuPy is required on the AEC H200 for numerical verification.
+# On macOS or other non-CUDA environments the numerical test is skipped.
+try:
+    import cupy as cp
+    _CUPY_AVAILABLE = cp.cuda.runtime.getDeviceCount() >= 1
+except Exception:
+    cp = None  # type: ignore[assignment]
+    _CUPY_AVAILABLE = False
 
 MODELS_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -56,6 +65,131 @@ def load_all_graphs() -> Dict[str, Graph]:
             graphs[name] = import_onnx(path)
             print(f"  Loaded {name}: {len(graphs[name].nodes)} nodes")
     return graphs
+
+
+def test_full_fp32_numerical(graphs: Dict[str, Graph]) -> float:
+    """FULL_FP32 numerical verification against golden outputs.
+
+    Creates a FULL_FP32 strategy, decomposes every node, and executes
+    through the connected C3.1→C3.5 CuPy pipeline on the AEC H200 device.
+    Compares outputs against golden .npy tensors and checks top-1 agreement.
+
+    Returns:
+        Validation fraction in [0, 1]. This is a hard D1 gate, not an
+        additional C3.2 scoring point.
+    """
+    print("\n=== FULL_FP32 Numerical Verification ===")
+    score = 0.0
+
+    if not _CUPY_AVAILABLE:
+        print("  [SKIP] CuPy/CUDA device not available — numerical verification "
+              "requires the AEC H200 GPU.")
+        SCORES["FP32_NUM"] = 0.0
+        return 0.0
+
+    from pathlib import Path
+    from c32.strategy import Strategy
+    from c35.executor import CrossStageReferencePipeline
+
+    ROOT = Path(__file__).resolve().parents[1]
+    TESTDATA = (
+        ROOT / ".specification" / "testcases" / "release_to_competitors"
+        / "testdata" / "c35"
+    )
+    # ── Step 1: Verify FULL_FP32 decomposition ─────────────────
+    fp32_strategy = Strategy(mode=ExecutionMode.FULL_FP32)
+    all_fp32 = True
+    all_decomposed = 0
+    total_nodes = 0
+    for gname, graph in graphs.items():
+        for nid in graph.node_order:
+            node = graph.nodes[nid]
+            total_nodes += 1
+            prec = fp32_strategy.select_precision(node, graph)
+            if prec.compute_dtype != "fp32":
+                all_fp32 = False
+                print(f"  NON-FP32: {node.op_type}:{node.id} -> {prec.compute_dtype}")
+            kernels = fp32_strategy.decompose(node, graph, prec)
+            if kernels:
+                all_decomposed += 1
+                for k in kernels:
+                    if "f32" not in k.kernel_name and not k.kernel_name.endswith("_fp32"):
+                        if k.kernel_name not in ("reshape", "transpose", "flatten",
+                                                  "split", "gather", "constant",
+                                                  "reduce_max", "reduce_sum", "reduce_mean",
+                                                  "exp", "sqrt"):
+                            all_fp32 = False
+
+    d0a_score = 0.4 if all_fp32 else 0.0
+    check(all_fp32,
+          f"All {total_nodes} nodes select fp32 in FULL_FP32 mode", d0a_score)
+    score += d0a_score
+
+    d0b_score = 0.1 if all_decomposed == total_nodes else 0.0
+    check(all_decomposed == total_nodes,
+          f"All {total_nodes} nodes decomposed ({all_decomposed}/{total_nodes})", d0b_score)
+    score += d0b_score
+
+    # ── Step 2: Execute and compare against golden ────────────
+    models_ok = 0
+    for gname in ("mlp", "resnet", "transformer"):
+        model_path = ROOT / "models" / f"{gname}_v1.onnx"
+        golden_path = TESTDATA / f"{gname}_v1" / "golden" / "logits.npy"
+
+        if not model_path.is_file() or not golden_path.is_file():
+            print(f"  [SKIP] {gname}: missing model or golden data")
+            continue
+
+        try:
+            graph = import_onnx(str(model_path))
+            pipeline = CrossStageReferencePipeline(
+                graph, str(model_path), qualify_optimizations=True,
+            )
+
+            # Load a small feed batch (2 samples) for the qualification run
+            input_dir = TESTDATA / f"{gname}_v1" / "input"
+            import json
+            manifest = json.loads((input_dir / "manifest.json").read_text())
+            feed_dict = {
+                entry["name"]: cp.load(input_dir / entry["file"])[:2]
+                for entry in manifest["tensors"]
+            }
+
+            outputs = pipeline.run(feed_dict)
+
+            # Compare against golden (first 2 samples)
+            golden = cp.load(str(golden_path))[:2]
+            logits = outputs["logits"]
+            max_diff = float(cp.max(cp.abs(logits - golden)).item())
+
+            allclose_ok = bool(cp.allclose(
+                logits, golden, rtol=1e-3, atol=1e-3
+            ))
+            top1_match = float(cp.mean(
+                cp.argmax(logits, axis=-1).reshape(-1)
+                == cp.argmax(golden, axis=-1).reshape(-1)
+            ).item())
+            model_ok = allclose_ok and top1_match >= 0.99
+            if model_ok:
+                models_ok += 1
+
+            print(
+                f"  {gname}: max_abs_diff={max_diff:.6e}  "
+                f"allclose={allclose_ok}  top1_match={top1_match:.4f}  "
+                f"-> {'OK' if model_ok else 'FAIL'}"
+            )
+        except Exception as exc:
+            print(f"  {gname}: EXCEPTION — {exc}")
+
+    models_total = 3
+    d0c_score = (models_ok / models_total) * 0.5
+    check(models_ok == models_total,
+          f"Golden comparison: {models_ok}/{models_total} models pass", d0c_score)
+    score += d0c_score
+
+    SCORES["FP32_NUM"] = score
+    print(f"  FULL_FP32 numerical total: {score:.2f} / 1.0 pt")
+    return score
 
 
 def test_d1_precision(graphs: Dict[str, Graph]) -> float:
@@ -289,6 +423,10 @@ def main() -> int:
     test_d3_intermediates(graphs)
     test_d4_tuning(graphs)
     test_d5_hardware()
+    fp32_numerical = test_full_fp32_numerical(graphs)
+    if _CUPY_AVAILABLE and fp32_numerical < 1.0:
+        # FULL_FP32 correctness is a hard D1 gate, not an extra scoring point.
+        SCORES["D1"] = 0.0
 
     print_summary()
     return 0 if FAIL == 0 else 1

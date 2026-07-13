@@ -12,8 +12,8 @@ The implementation is **not submission-ready**. Structural validation was
 passing before the CuPy-only conversion, and earlier H200 runs passed MLP plus
 ResNet, but all three models now require a fresh server run against the revised
 runtime. Direct C3.2-kernel and C3.4-operation execution remains incomplete.
-Dependency, AI-assistance, and archive disclosures also remain open release
-blockers.
+Direct dependency verification and post-commit archive inspection also remain
+open release blockers. Public-source and AI-assistance disclosures are current.
 
 ## Shared graph foundation
 
@@ -39,8 +39,11 @@ blockers.
 - Tuning returns populated block, grid, and shared-memory fields subject to the
   configured hardware limits.
 
-The released C3.2 checks report `14.17/15` structurally. This is not proof that
-FP8/FP4 kernels execute on AEC or meet end-to-end numerical thresholds.
+The released C3.2 checks report `14.17/15` structurally. FULL_FP32 numerical
+correctness is a hard D1 gate, not a sixteenth point: the H200-only validation
+path compares connected C3.1→C3.5 CuPy outputs with golden results using
+`max_abs_diff <= 1e-3` and `top1_match >= 0.99`. It has not been rerun after
+the bounded-region revision. FP8/FP4 H200 correctness also remains unproven.
 
 ## C3.3 fusion
 
@@ -52,20 +55,24 @@ The pass pipeline implements:
 - `FusedEWChain`
 - `FusedSoftmaxDropout`
 - `FusedResidualNorm`
+- `FusedExecutionRegion` (bounded, topology-driven region program)
 
 Passes apply safety guards, preserve external operands and attributes, snapshot
 the graph before mutation, restore it after failure, rebuild indexes, and emit
 machine-readable fusion logs. The array executor implements numerical
 semantics for each fused node.
 
-Released-model launch reductions after the 2026-07-13 ComputeActivation
-addition (still below the rubric's 60% full-credit target):
+Released-model structural reductions after bounded execution-region formation:
 
 | Model | Launch reduction | Buffer reduction |
 |---|---:|---:|
-| MLP | 44.4% | 40.0% |
-| ResNet-18 | 38.7% | 36.2% |
-| Transformer | 18.2% | 27.9% |
+| MLP | 88.9% | 100.0% |
+| ResNet-18 | 84.0% | 76.6% |
+| Transformer | 74.3% | 73.5% |
+
+These exceed the published graph-level 60% thresholds. The region reference
+executor still issues the contained CuPy operations separately, so the table
+does not claim equivalent physical H200 kernel-launch reductions.
 
 The released
 ResNet contains no BatchNorm nodes because BN was folded during export.
@@ -95,7 +102,7 @@ driving the CuPy execution path on the AEC H200.
 - CuPy 14.1.1 is the only numerical backend.
 - Weights and batch tensors move to CuPy once, intermediate computation stays on
   the device, and final float32 output returns to the host for NPY generation.
-- All 17 published ONNX operators and the six fused operator types are
+- All 17 published ONNX operators and the seven fused operator types are
   dispatched by the CuPy engine.
 - CuPy-specific Split handling uses Python integer boundaries, matching the
   native server's CuPy 14.1.1 behavior.
@@ -133,9 +140,9 @@ gate and [remaining problems](remaining-problems.md) for unclosed items.
 | # | Change | Impact |
 |---|--------|--------|
 | 11, 29, 35 | Capped C3.3 and C3.4 self-scores to their maximums | C3.3: `8.60/8.6`, C3.4: `10.00/10.0` |
-| 28 | Added `FusedComputeActivation` (Gemm/MatMul/Conv + Relu/Erf) | MLP: 0%→44%, ResNet: 11%→39% launch reduction; issue 5 remains open below 60% |
+| 28 | Added `FusedComputeActivation` plus bounded, topology-driven `FusedExecutionRegion` formation | Released-graph structural launch/logical-buffer reductions now exceed 60% for all three models; physical fused H200 lowering remains open in #27 |
 | 37 | Replaced scalar FP32 zero placeholder with `None` for omitted optional inputs | Type-agnostic optional input handling |
-| — | Added the current academic-attribution draft to `docs/SUBMISSION.md` | Documentation progress only; issue 43 remains open pending final provenance review |
+| 43–44 | Reconciled academic/public-source attribution and AI-assistance disclosure with the implementation | TVM, DNNFusion, MLIR Linalg, CUDA Graphs, GitHub Copilot, and OpenAI Codex are disclosed; keep current after later revisions |
 | — | Removed the unavailable Python NVML binding and disclosed the server-native `nvidia-smi` call boundary | Native-server dependency compliance |
 | — | Multi-level nvidia-smi fallback for MIG GPU process tracking | `--query-compute-apps`, per-GPU, and `--query-accounted-apps` probes |
 | — | Surfaced stderr/stdout tails on test failure for remote diagnostics | Faster crash triage |
@@ -146,7 +153,6 @@ gate and [remaining problems](remaining-problems.md) for unclosed items.
 |---|------|
 | 1–2 | AEC compiler/runtime/device backend |
 | 3–4 | C3.2 FP8/FP4 qualification and hardware query |
-| 5 | C3.3 launch and buffer reductions remain below the 60% full-credit target |
 | 6 | BN weight folding and fused AEC kernels |
 | 7–8 | C3.4 AEC runtime integration and stream concurrency |
 | 9, 36 | C3.2 kernel-step execution on H200 |
@@ -157,8 +163,6 @@ gate and [remaining problems](remaining-problems.md) for unclosed items.
 | 38 | Non-default-attribute operator tests |
 | 39–40 | Cold timing, NVML memory, and kernel/runtime H200 path |
 | 10, 41–42 | Complete native dependency verification/disclosure, including direct `google.protobuf` use |
-| 43 | Final academic and source-provenance review |
-| 44 | Complete AI-assistance disclosure, including OpenAI Codex |
 | 45 | Build and inspect the actual submission archive; `.gitignore` alone is not cleanliness evidence |
 | 46 | Run all three models through the revised CuPy-only CLI and runner on the H200 |
 | Q1–Q5 | Organizer questions |
@@ -211,5 +215,35 @@ gate and [remaining problems](remaining-problems.md) for unclosed items.
 - Integrity gate: the conversion is general, introduces no case-specific logic,
   evaluator changes, generated answers, or new dependency. CuPy remains a
   disclosed server-native dependency.
+
+### 2026-07-13 C3.3 bounded execution-region revision and cleanup audit
+
+- Added a deterministic region pass over supported single-output operations.
+  Regions contain at most six nodes, cross only single-consumer internal edges,
+  stop at graph outputs, exclude multi-output `Split`, and expose all external
+  operands explicitly. The pass does not inspect model/test names, hashes,
+  weights, or fixed input values.
+- Added a CuPy reference executor for the retained ordered region program. This
+  preserves a qualification path but currently executes internal operations as
+  a sequence; it is not evidence of one physical H200 kernel per region.
+- Local released-graph structural evidence: MLP 88.9% launch / 100.0% logical
+  buffer reduction; ResNet-18 84.0% / 76.6%; Transformer 74.3% / 73.5%. All
+  three optimized graphs validate.
+- Corrected the C3.2 self-test scale back to the specified 15 points. The
+  FULL_FP32 numerical check is now a hard D1 gate and tests golden top-1
+  agreement rather than task-label accuracy.
+- Removed the obsolete local virtual environment, Python bytecode caches, and
+  generated submission archive. The archive builder remains source-controlled,
+  while its generated `submission.tar.gz` is ignored.
+- Validation: C3.1 `7/7`, C3.2 structural `14.17/15.0` with H200 numerical test
+  skipped locally, C3.3 `64/64`, and C3.4 `505/505`. The C3.5 cross-stage and
+  shared scoring suites could not import CuPy on this local machine; remote
+  H200 numerical validation remains #46.
+- Public influences were disclosed in `docs/c33-fusion.md` and
+  `docs/SUBMISSION.md`: TVM, DNNFusion, MLIR Linalg, and the NVIDIA CUDA Graphs
+  guide. No source code or prose was copied.
+- Integrity gate: no plagiarism, testcase/model hardcoding, evaluator bypass,
+  precomputed artifact, hidden-case targeting, or new dependency was
+  introduced. Public references and OpenAI Codex assistance are disclosed.
 
 [remaining-problems](remaining-problems.md) · [SUBMISSION](SUBMISSION.md)

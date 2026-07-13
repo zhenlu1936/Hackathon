@@ -658,6 +658,58 @@ def op_fused_compute_activation(inputs: List[xp.ndarray],
     return act_impl([result], act_attrs)
 
 
+def op_fused_execution_region(inputs: List[xp.ndarray],
+                              attrs: Dict[str, Any]) -> Any:
+    """Execute the exact operator program retained by a C3.3 region rewrite.
+
+    This is the correctness/reference lowering.  It intentionally does not
+    claim that the contained operations are one physical GPU kernel; that
+    requires a separate hardware-specific code-generation step.
+    """
+    program = attrs.get("_region_ops", [])
+    if not program:
+        raise ValueError("FusedExecutionRegion has no operator program")
+
+    values: Dict[str, Any] = {}
+    result: Any = None
+    for entry in program:
+        op_inputs: List[Any] = []
+        for ref in entry.get("inputs", []):
+            if ref is None:
+                op_inputs.append(None)
+            elif isinstance(ref, int):
+                if ref < 0 or ref >= len(inputs):
+                    raise ValueError(
+                        f"FusedExecutionRegion input index {ref} is out of range"
+                    )
+                op_inputs.append(inputs[ref])
+            elif isinstance(ref, str) and ref in values:
+                op_inputs.append(values[ref])
+            else:
+                raise ValueError(
+                    f"FusedExecutionRegion cannot resolve value {ref!r}"
+                )
+
+        op_type = entry.get("op", "")
+        impl = OP_DISPATCH.get(op_type)
+        if impl is None or op_type == "FusedExecutionRegion":
+            raise ValueError(
+                f"Unsupported operation in FusedExecutionRegion: {op_type}"
+            )
+        result = impl(op_inputs, entry.get("attrs", {}))
+        output_names = entry.get("outputs", [])
+        result_values = result if isinstance(result, (list, tuple)) else [result]
+        if len(result_values) != len(output_names):
+            raise ValueError(
+                f"{op_type} produced {len(result_values)} values for "
+                f"{len(output_names)} region outputs"
+            )
+        for output_name, output_value in zip(output_names, result_values):
+            values[output_name] = output_value
+
+    return result
+
+
 # Copy of dispatch for FusedEWChain internal use (avoid circular import)
 _OP_DISPATCH = {
     "Add": op_add,
@@ -697,5 +749,6 @@ _FUSED_DISPATCH = {
     "FusedSoftmaxDropout": op_fused_softmax_dropout,
     "FusedResidualNorm": op_fused_residual_norm,
     "FusedComputeActivation": op_fused_compute_activation,
+    "FusedExecutionRegion": op_fused_execution_region,
 }
 OP_DISPATCH.update(_FUSED_DISPATCH)
