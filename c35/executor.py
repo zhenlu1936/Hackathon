@@ -561,6 +561,7 @@ def load_and_infer(
         "output_dir": output_dir,
         "batch_size": actual_batch,
         "backend": engine.backend_name(),
+        "backend_evidence": engine.runtime_evidence(),
         "total_samples": total_samples,
         "output_shape": list(final_output.shape),
         "parse_time_s": t_parse_end - t_parse_start,

@@ -43,6 +43,7 @@ RELEASE = ROOT / ".specification" / "testcases" / "release_to_competitors"
 DEFAULT_MODELS = RELEASE / "models"
 DEFAULT_TESTDATA = RELEASE / "testdata" / "c35"
 EXPECTED_CUPY_VERSION = "14.1.1"
+GPU_EVIDENCE_PREFIX = "C35_GPU_EVIDENCE_JSON="
 DEFAULT_COMMAND = (
     f"{shlex.quote(sys.executable)} -m c35.deploy "
     "--onnx {onnx} --input {input} --output {output} "
@@ -60,6 +61,8 @@ class ModelResult:
     peak_gpu_memory_bytes: Optional[int] = None
     gpu_process_observed: bool = False
     nvml_status: str = "not_started"
+    gpu_evidence_source: Optional[str] = None
+    backend_evidence: Dict[str, Any] = field(default_factory=dict)
     precision_pass: bool = False
     accuracy_pass: Optional[bool] = None
     accuracy: Optional[float] = None
@@ -112,6 +115,30 @@ def _cupy_preflight() -> Dict[str, Any]:
 
 def _tail(text: str, limit: int = 4000) -> str:
     return text if len(text) <= limit else text[-limit:]
+
+
+def _parse_backend_evidence(stderr: str) -> Dict[str, Any]:
+    for line in reversed(stderr.splitlines()):
+        if not line.startswith(GPU_EVIDENCE_PREFIX):
+            continue
+        try:
+            value = json.loads(line[len(GPU_EVIDENCE_PREFIX):])
+        except json.JSONDecodeError:
+            return {}
+        return value if isinstance(value, dict) else {}
+    return {}
+
+
+def _valid_cupy_evidence(evidence: Dict[str, Any]) -> bool:
+    try:
+        return (
+            evidence.get("backend") == "cupy"
+            and evidence.get("cupy_version") == EXPECTED_CUPY_VERSION
+            and int(evidence.get("pool_reserved_bytes", 0)) > 0
+            and int(evidence.get("device_id", -1)) >= 0
+        )
+    except (TypeError, ValueError):
+        return False
 
 
 def _read_json(path: Path) -> Dict[str, Any]:
@@ -480,13 +507,27 @@ def run_model(model_name: str, command_template: str, models_dir: Path,
                     result.wall_time_s = time.perf_counter() - start
                 stdout_file.seek(0)
                 stderr_file.seek(0)
-                result.stdout_tail = _tail(stdout_file.read())
-                result.stderr_tail = _tail(stderr_file.read())
-                result.peak_gpu_memory_bytes = (
-                    sampler.peak_bytes if sampler.status.startswith("ok") else None
-                )
+                stdout_text = stdout_file.read()
+                stderr_text = stderr_file.read()
+                result.stdout_tail = _tail(stdout_text)
+                result.stderr_tail = _tail(stderr_text)
+                result.backend_evidence = _parse_backend_evidence(stderr_text)
                 result.gpu_process_observed = sampler.process_observed
                 result.nvml_status = sampler.status
+
+                sampled = (
+                    sampler.status.startswith("ok")
+                    and sampler.process_observed
+                    and sampler.peak_bytes > 0
+                )
+                if sampled:
+                    result.peak_gpu_memory_bytes = sampler.peak_bytes
+                    result.gpu_evidence_source = sampler.status.split(":", 1)[-1]
+                elif _valid_cupy_evidence(result.backend_evidence):
+                    result.peak_gpu_memory_bytes = int(
+                        result.backend_evidence["pool_reserved_bytes"]
+                    )
+                    result.gpu_evidence_source = "cupy-pool"
 
             if result.timed_out:
                 raise TimeoutError(f"Command exceeded {timeout_s:.1f} seconds")
@@ -495,11 +536,11 @@ def run_model(model_name: str, command_template: str, models_dir: Path,
             _validate_outputs(model_dir, output_dir, result)
             result.gpu_evidence_pass = (
                 allow_reference
-                or (result.nvml_status.startswith("ok") and result.gpu_process_observed)
+                or result.gpu_evidence_source is not None
             )
             if not result.gpu_evidence_pass:
                 result.errors.append(
-                    "No target GPU process memory was observed; "
+                    "No target GPU execution evidence was observed; "
                     "use --allow-reference only for disclosed local reference runs"
                 )
             accuracy_ok = result.accuracy_pass is not False
@@ -527,7 +568,8 @@ def _print_result(result: ModelResult) -> None:
     )
     print(f"[{status}] {result.model}")
     print(f"  wall time:       {result.wall_time_s:.6f}s" if result.wall_time_s else "  wall time:       n/a")
-    print(f"  peak GPU memory: {memory} ({result.nvml_status})")
+    source = result.gpu_evidence_source or result.nvml_status
+    print(f"  peak GPU memory: {memory} ({source})")
     print(f"  max abs diff:    {result.max_abs_diff}")
     print(f"  accuracy:        {accuracy}")
     if result.errors:

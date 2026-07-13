@@ -29,12 +29,12 @@ The runner performs one cold subprocess execution per model and:
 - applies each model's `rtol` and `atol` from `thresholds.json`;
 - computes the requested top-1 accuracy and model-specific minimum;
 - measures process wall time from spawn through exit;
-- samples GPU memory for the root process and Linux `/proc` descendants using `pynvml`, with an automatic `nvidia-smi` fallback;
+- samples GPU memory for the root process and Linux `/proc` descendants using `pynvml`, with automatic `nvidia-smi` and process-local CuPy memory-pool fallbacks for MIG environments;
 - performs a CuPy import, CUDA-device, and matrix-multiply preflight;
 - emits a machine-readable JSON report;
 - returns nonzero if any correctness, accuracy, output-contract, command, timeout, or required GPU-evidence check fails.
 
-The normal mode requires GPU process memory to be observed through `pynvml` or `nvidia-smi`. On a disclosed CPU development machine, add `--allow-reference`; the report records that waiver. GPU observation does not by itself prove that the implementation uses the required AEC compiler/runtime, so AEC call-path compliance still requires code review and target-environment evidence.
+The normal mode requires GPU execution evidence from `pynvml`, `nvidia-smi`, or a structured record emitted by the child after real CuPy execution. The child record includes the device, CuPy version, and nonzero default-pool reservation; its pool total is a process-local high-water proxy when MIG suppresses per-process accounting, not an NVML-equivalent whole-process measurement. On a disclosed CPU development machine, add `--allow-reference`; the report records that waiver. GPU observation does not itself prove AEC execution.
 
 The report awards the known 15-point correctness/accuracy gate only when every model and the CuPy preflight pass. Runtime and peak-memory points remain `null` because the written rubric ranks submissions against one another; raw measurements are recorded for that ranking.
 

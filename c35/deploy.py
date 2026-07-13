@@ -191,6 +191,11 @@ def main() -> None:
             f"{plan.get('total_allocations', 0)} allocations",
             file=sys.stderr,
         )
+    print(
+        "C35_GPU_EVIDENCE_JSON="
+        + json.dumps(info.get("backend_evidence", {}), sort_keys=True),
+        file=sys.stderr,
+    )
 
     # Compute accuracy if labels are available and model is a classifier
     labels_path = args.labels

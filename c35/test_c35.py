@@ -315,6 +315,33 @@ class C35OperatorTests(unittest.TestCase):
         self.assertEqual(out[1].shape, (1, 18, 128))
         self.assertEqual(out[2].shape, (1, 18, 128))
 
+    def test_split_materializes_backend_indices(self) -> None:
+        import c35.engine as engine
+
+        original_xp = engine.xp
+
+        class StrictArrayModule:
+            int64 = np.int64
+            float32 = np.float32
+
+            @staticmethod
+            def asarray(value, dtype=None):
+                return np.asarray(value, dtype=dtype)
+
+            @staticmethod
+            def split(value, indices, axis=0):
+                if not isinstance(indices, np.ndarray):
+                    raise TypeError("indices must be a backend ndarray")
+                return np.split(value, indices, axis=axis)
+
+        try:
+            engine.xp = StrictArrayModule()
+            x = np.arange(12, dtype=np.float32).reshape(1, 12)
+            out = engine.op_split([x], {"axis": 1, "split": [3, 4, 5]})
+        finally:
+            engine.xp = original_xp
+        self.assertEqual([part.shape for part in out], [(1, 3), (1, 4), (1, 5)])
+
     def test_transpose(self) -> None:
         from c35.engine import op_transpose
         x = np.random.randn(1, 4, 18, 32).astype(np.float32)
@@ -343,6 +370,37 @@ class C35OperatorTests(unittest.TestCase):
         x = np.random.randn(1, 64, 1, 1).astype(np.float32)
         out = op_flatten([x], {"axis": 1})
         self.assertEqual(out.shape, (1, 64))
+
+
+class C35RunnerEvidenceTests(unittest.TestCase):
+    def test_valid_cupy_pool_evidence(self) -> None:
+        from c35.standard_runner import (
+            GPU_EVIDENCE_PREFIX,
+            _parse_backend_evidence,
+            _valid_cupy_evidence,
+        )
+
+        payload = {
+            "backend": "cupy",
+            "cupy_version": "14.1.1",
+            "device_id": 0,
+            "device_name": "test-mig",
+            "pool_reserved_bytes": 4096,
+        }
+        stderr = "log line\n" + GPU_EVIDENCE_PREFIX + json.dumps(payload) + "\n"
+        parsed = _parse_backend_evidence(stderr)
+        self.assertEqual(parsed, payload)
+        self.assertTrue(_valid_cupy_evidence(parsed))
+
+    def test_zero_pool_is_not_gpu_evidence(self) -> None:
+        from c35.standard_runner import _valid_cupy_evidence
+
+        self.assertFalse(_valid_cupy_evidence({
+            "backend": "cupy",
+            "cupy_version": "14.1.1",
+            "device_id": 0,
+            "pool_reserved_bytes": 0,
+        }))
 
 
 if __name__ == "__main__":

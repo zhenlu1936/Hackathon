@@ -80,6 +80,32 @@ def synchronize() -> None:
     if _BACKEND_NAME == "cupy":
         xp.cuda.get_current_stream().synchronize()
 
+
+def runtime_evidence() -> Dict[str, Any]:
+    """Return structured evidence from the active numerical backend.
+
+    CuPy's default pool retains allocations, so ``total_bytes`` is a stable
+    process-local high-water proxy even when MIG hides the process from
+    ``nvidia-smi --query-compute-apps``.
+    """
+    evidence: Dict[str, Any] = {"backend": _BACKEND_NAME}
+    if _BACKEND_NAME != "cupy":
+        return evidence
+    device = xp.cuda.Device()
+    properties = xp.cuda.runtime.getDeviceProperties(device.id)
+    name = properties.get("name", "unknown")
+    if isinstance(name, bytes):
+        name = name.decode("utf-8", errors="replace")
+    pool = xp.get_default_memory_pool()
+    evidence.update({
+        "device_id": int(device.id),
+        "device_name": str(name),
+        "cupy_version": str(xp.__version__),
+        "pool_used_bytes": int(pool.used_bytes()),
+        "pool_reserved_bytes": int(pool.total_bytes()),
+    })
+    return evidence
+
 # ── Erf implementation ──────────────────────────────────────────────
 # Rational Chebyshev approximation for the error function.
 # Accurate to ~1e-7, no scipy dependency required.
@@ -398,7 +424,9 @@ def op_split(inputs: List[xp.ndarray], attrs: Dict[str, Any]) -> List[xp.ndarray
         size_per = x.shape[axis] // num_outputs
         split_sizes = [size_per] * num_outputs
 
-    indices = xp.cumsum(split_sizes)[:-1]
+    # CuPy deliberately requires an ndarray here, while NumPy also accepts a
+    # Python list.  Materialize backend-native split points for both paths.
+    indices = xp.asarray(split_sizes, dtype=xp.int64).cumsum()[:-1]
     results = xp.split(x, indices, axis=axis)
     return [r.astype(xp.float32, copy=False) for r in results]
 

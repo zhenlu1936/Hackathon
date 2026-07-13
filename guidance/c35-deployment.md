@@ -114,4 +114,4 @@ On the GPU server, the normal workflow is one command:
 ./run_c35_standard.sh
 ```
 
-It checks release-data presence, performs a real CuPy device smoke test, runs all three models in fresh subprocesses, samples memory using `pynvml` or an automatic `nvidia-smi` fallback, applies golden/accuracy gates, and writes `c35-standard-report.json`. Set `PYTHON`, `C35_REPORT`, or `COMMAND_TEMPLATE` only when overriding those defaults.
+It checks release-data presence, performs a real CuPy device smoke test, runs all three models in fresh subprocesses, samples memory using `pynvml`, `nvidia-smi`, or a process-local CuPy-pool fallback on restrictive MIG systems, applies golden/accuracy gates, and writes `c35-standard-report.json`. Set `PYTHON`, `C35_REPORT`, or `COMMAND_TEMPLATE` only when overriding those defaults.
