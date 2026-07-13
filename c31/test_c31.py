@@ -9,9 +9,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import numpy as np
 import onnx
-from onnx import TensorProto, helper, numpy_helper
+from onnx import TensorProto, helper
 
 from c31.import_onnx import import_onnx
 from c3common.ir.graph import Graph, Node
@@ -116,7 +115,7 @@ class C31SpecificationTests(unittest.TestCase):
 
     def test_initializer_is_not_a_public_input(self) -> None:
         weight_info = helper.make_tensor_value_info("w", TensorProto.FLOAT, [1])
-        weight = numpy_helper.from_array(np.array([1], dtype=np.float32), name="w")
+        weight = helper.make_tensor("w", TensorProto.FLOAT, [1], [1.0])
         path = self._save(
             "initializer_input",
             helper.make_graph([], "initializer", [weight_info], [weight_info], [weight]),
@@ -140,7 +139,7 @@ class C31SpecificationTests(unittest.TestCase):
             "Constant",
             [],
             ["sub_output"],
-            value=numpy_helper.from_array(np.array([1], dtype=np.float32)),
+            value=helper.make_tensor("", TensorProto.FLOAT, [1], [1.0]),
         )
         body = helper.make_graph([sub_constant], "body", [], [sub_output])
         x = helper.make_tensor_value_info("x", TensorProto.FLOAT, [1])

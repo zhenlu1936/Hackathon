@@ -24,6 +24,7 @@ from c33.fusion import (
     fuse_elementwise_chain,
     fuse_softmax_dropout,
     fuse_residual_norm,
+    fuse_compute_activation,
     cleanup_dead_tensors,
     ELEMENTWISE_OPS,
 )
@@ -81,6 +82,7 @@ def _count_buffers(graph: Graph) -> int:
 PASS_ORDER = [
     ("Conv2dBatchNorm", fuse_conv_batchnorm),
     ("MatMulBias", fuse_matmul_bias),
+    ("ComputeActivation", fuse_compute_activation),
     ("ResidualNorm", fuse_residual_norm),
     ("SoftmaxDropout", fuse_softmax_dropout),
     ("EWChain", fuse_elementwise_chain),

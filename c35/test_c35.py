@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import numpy as np
+import cupy as cp
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -43,7 +43,6 @@ class C35SpecificationTests(unittest.TestCase):
             "--onnx", str(model_path),
             "--input", str(input_dir),
             "--output", str(output_dir),
-            "--backend", "numpy",
         ]
         if batch_size is not None:
             cmd.extend(["--batch-size", str(batch_size)])
@@ -73,10 +72,10 @@ class C35SpecificationTests(unittest.TestCase):
         self.assertEqual(entry["name"], "logits")
         self.assertEqual(entry["dtype"], "float32")
 
-        logits = np.load(logits_path)
-        self.assertEqual(logits.dtype, np.float32)
+        logits = cp.load(logits_path)
+        self.assertEqual(logits.dtype, cp.float32)
         self.assertEqual(list(logits.shape), expected_shape)
-        self.assertTrue(np.all(np.isfinite(logits)), "Output contains NaN/Inf")
+        self.assertTrue(cp.all(cp.isfinite(logits)), "Output contains NaN/Inf")
         self.assertTrue(logits.flags["C_CONTIGUOUS"], "Output not C-contiguous")
 
     # ── MLP tests ───────────────────────────────
@@ -85,15 +84,15 @@ class C35SpecificationTests(unittest.TestCase):
         output_dir = self._run_deploy("mlp", batch_size=256)
         self._check_output_manifest(output_dir, [10000, 10])
 
-        golden = np.load(TESTDATA_DIR / "mlp_v1" / "golden" / "logits.npy")
-        logits = np.load(output_dir / "logits.npy")
+        golden = cp.load(TESTDATA_DIR / "mlp_v1" / "golden" / "logits.npy")
+        logits = cp.load(output_dir / "logits.npy")
         self.assertTrue(
-            np.allclose(logits, golden, rtol=1e-3, atol=1e-3),
-            f"MLP allclose failed: max_diff={np.max(np.abs(logits - golden)):.6e}"
+            cp.allclose(logits, golden, rtol=1e-3, atol=1e-3),
+            f"MLP allclose failed: max_diff={cp.max(cp.abs(logits - golden)):.6e}"
         )
 
-        labels = np.load(TESTDATA_DIR / "mlp_v1" / "labels.npy")
-        acc = np.mean(np.argmax(logits, axis=-1) == labels.reshape(-1))
+        labels = cp.load(TESTDATA_DIR / "mlp_v1" / "labels.npy")
+        acc = cp.mean(cp.argmax(logits, axis=-1) == labels.reshape(-1))
         self.assertGreaterEqual(acc, 0.98, f"MLP accuracy {acc:.4f} < 0.98")
 
     def test_mlp_batch_size_one(self) -> None:
@@ -114,9 +113,9 @@ class C35SpecificationTests(unittest.TestCase):
         """Output must be identical regardless of batch size."""
         out1 = self._run_deploy("mlp", batch_size=1)
         out2 = self._run_deploy("mlp", batch_size=256)
-        logits1 = np.load(out1 / "logits.npy")
-        logits2 = np.load(out2 / "logits.npy")
-        max_diff = np.max(np.abs(logits1 - logits2))
+        logits1 = cp.load(out1 / "logits.npy")
+        logits2 = cp.load(out2 / "logits.npy")
+        max_diff = cp.max(cp.abs(logits1 - logits2))
         self.assertLess(
             max_diff, 1e-3,
             f"Batch-size-independent outputs differ by {max_diff:.6e}"
@@ -128,15 +127,15 @@ class C35SpecificationTests(unittest.TestCase):
         output_dir = self._run_deploy("resnet", batch_size=64)
         self._check_output_manifest(output_dir, [10000, 10])
 
-        golden = np.load(TESTDATA_DIR / "resnet_v1" / "golden" / "logits.npy")
-        logits = np.load(output_dir / "logits.npy")
+        golden = cp.load(TESTDATA_DIR / "resnet_v1" / "golden" / "logits.npy")
+        logits = cp.load(output_dir / "logits.npy")
         self.assertTrue(
-            np.allclose(logits, golden, rtol=1e-3, atol=1e-3),
-            f"ResNet allclose failed: max_diff={np.max(np.abs(logits - golden)):.6e}"
+            cp.allclose(logits, golden, rtol=1e-3, atol=1e-3),
+            f"ResNet allclose failed: max_diff={cp.max(cp.abs(logits - golden)):.6e}"
         )
 
-        labels = np.load(TESTDATA_DIR / "resnet_v1" / "labels.npy")
-        acc = np.mean(np.argmax(logits, axis=-1) == labels.reshape(-1))
+        labels = cp.load(TESTDATA_DIR / "resnet_v1" / "labels.npy")
+        acc = cp.mean(cp.argmax(logits, axis=-1) == labels.reshape(-1))
         self.assertGreaterEqual(acc, 0.85, f"ResNet accuracy {acc:.4f} < 0.85")
 
     def test_resnet_batch_indivisible(self) -> None:
@@ -150,11 +149,11 @@ class C35SpecificationTests(unittest.TestCase):
         output_dir = self._run_deploy("transformer", batch_size=128)
         self._check_output_manifest(output_dir, [10000, 18, 14])
 
-        golden = np.load(TESTDATA_DIR / "transformer_v1" / "golden" / "logits.npy")
-        logits = np.load(output_dir / "logits.npy")
+        golden = cp.load(TESTDATA_DIR / "transformer_v1" / "golden" / "logits.npy")
+        logits = cp.load(output_dir / "logits.npy")
         self.assertTrue(
-            np.allclose(logits, golden, rtol=1e-3, atol=1e-3),
-            f"Transformer allclose failed: max_diff={np.max(np.abs(logits - golden)):.6e}"
+            cp.allclose(logits, golden, rtol=1e-3, atol=1e-3),
+            f"Transformer allclose failed: max_diff={cp.max(cp.abs(logits - golden)):.6e}"
         )
 
     def test_transformer_batch_one(self) -> None:
@@ -167,9 +166,9 @@ class C35SpecificationTests(unittest.TestCase):
         """Two runs with the same inputs must produce identical outputs."""
         out1 = self._run_deploy("mlp", batch_size=256)
         out2 = self._run_deploy("mlp", batch_size=256)
-        logits1 = np.load(out1 / "logits.npy")
-        logits2 = np.load(out2 / "logits.npy")
-        np.testing.assert_array_equal(logits1, logits2)
+        logits1 = cp.load(out1 / "logits.npy")
+        logits2 = cp.load(out2 / "logits.npy")
+        cp.testing.assert_array_equal(logits1, logits2)
 
     def test_manifest_self_consistent(self) -> None:
         """Manifest metadata must match actual file content."""
@@ -178,10 +177,10 @@ class C35SpecificationTests(unittest.TestCase):
                 output_dir = self._run_deploy(model, batch_size=32)
                 with open(output_dir / "manifest.json", "r") as f:
                     manifest = json.load(f)
-                logits = np.load(output_dir / "logits.npy")
+                logits = cp.load(output_dir / "logits.npy")
                 entry = manifest["tensors"][0]
                 self.assertEqual(entry["dtype"], "float32")
-                self.assertEqual(logits.dtype, np.float32)
+                self.assertEqual(logits.dtype, cp.float32)
                 self.assertEqual(list(logits.shape), entry["shape"])
 
     # ── CLI validation tests ────────────────────
@@ -224,49 +223,49 @@ class C35OperatorTests(unittest.TestCase):
 
     def test_relu(self) -> None:
         from c35.engine import op_relu
-        x = np.array([[-1.0, 0.0, 1.0, 2.0]], dtype=np.float32)
+        x = cp.array([[-1.0, 0.0, 1.0, 2.0]], dtype=cp.float32)
         out = op_relu([x], {})
-        np.testing.assert_array_equal(out, np.array([[0.0, 0.0, 1.0, 2.0]], dtype=np.float32))
+        cp.testing.assert_array_equal(out, cp.array([[0.0, 0.0, 1.0, 2.0]], dtype=cp.float32))
 
     def test_gemm_no_transpose(self) -> None:
         from c35.engine import op_gemm
-        a = np.array([[1.0, 2.0]], dtype=np.float32)
-        b = np.array([[3.0], [4.0]], dtype=np.float32)
-        c = np.array([[0.5]], dtype=np.float32)
+        a = cp.array([[1.0, 2.0]], dtype=cp.float32)
+        b = cp.array([[3.0], [4.0]], dtype=cp.float32)
+        c = cp.array([[0.5]], dtype=cp.float32)
         out = op_gemm([a, b, c], {"alpha": 1.0, "beta": 1.0})
-        expected = np.dot(a, b) + c
-        np.testing.assert_allclose(out, expected, rtol=1e-5)
+        expected = cp.dot(a, b) + c
+        cp.testing.assert_allclose(out, expected, rtol=1e-5)
 
     def test_gemm_transpose_b(self) -> None:
         from c35.engine import op_gemm
-        a = np.array([[1.0, 2.0]], dtype=np.float32)
-        b = np.array([[3.0, 4.0]], dtype=np.float32)
+        a = cp.array([[1.0, 2.0]], dtype=cp.float32)
+        b = cp.array([[3.0, 4.0]], dtype=cp.float32)
         # Test transposeB without bias (pass None as third input)
-        out = op_gemm([a, b, np.float32(0.0)], {"transB": 1, "alpha": 1.0, "beta": 0.0})
-        expected = np.dot(a, b.T)
-        np.testing.assert_allclose(out, expected, rtol=1e-5)
+        out = op_gemm([a, b, cp.float32(0.0)], {"transB": 1, "alpha": 1.0, "beta": 0.0})
+        expected = cp.dot(a, b.T)
+        cp.testing.assert_allclose(out, expected, rtol=1e-5)
 
     def test_softmax_stable(self) -> None:
         from c35.engine import op_softmax
-        x = np.array([[1.0, 2.0, 3.0]], dtype=np.float32)
+        x = cp.array([[1.0, 2.0, 3.0]], dtype=cp.float32)
         out = op_softmax([x], {"axis": -1})
-        self.assertAlmostEqual(float(np.sum(out)), 1.0, places=5)
-        self.assertTrue(np.all(out >= 0))
+        self.assertAlmostEqual(float(cp.sum(out)), 1.0, places=5)
+        self.assertTrue(bool(cp.all(out >= 0).item()))
 
     def test_layer_norm(self) -> None:
         from c35.engine import op_layer_normalization
-        x = np.array([[[1.0, 2.0, 3.0, 4.0]]], dtype=np.float32)
-        scale = np.array([1.0, 1.0, 1.0, 1.0], dtype=np.float32)
-        bias = np.array([0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        x = cp.array([[[1.0, 2.0, 3.0, 4.0]]], dtype=cp.float32)
+        scale = cp.array([1.0, 1.0, 1.0, 1.0], dtype=cp.float32)
+        bias = cp.array([0.0, 0.0, 0.0, 0.0], dtype=cp.float32)
         out = op_layer_normalization([x, scale, bias], {"axis": -1, "epsilon": 1e-5})
         # Mean should be close to 0, std close to 1
-        self.assertAlmostEqual(float(np.mean(out)), 0.0, places=5)
-        self.assertAlmostEqual(float(np.std(out)), 1.0, places=2)
+        self.assertAlmostEqual(float(cp.mean(out)), 0.0, places=5)
+        self.assertAlmostEqual(float(cp.std(out)), 1.0, places=2)
 
     def test_conv_3x3_s1(self) -> None:
         from c35.engine import op_conv
-        x = np.random.randn(1, 3, 32, 32).astype(np.float32)
-        w = np.random.randn(16, 3, 3, 3).astype(np.float32)
+        x = cp.random.randn(1, 3, 32, 32).astype(cp.float32)
+        w = cp.random.randn(16, 3, 3, 3).astype(cp.float32)
         out = op_conv([x, w], {
             "kernel_shape": [3, 3],
             "pads": [1, 1, 1, 1],
@@ -276,8 +275,8 @@ class C35OperatorTests(unittest.TestCase):
 
     def test_conv_3x3_s2(self) -> None:
         from c35.engine import op_conv
-        x = np.random.randn(1, 3, 32, 32).astype(np.float32)
-        w = np.random.randn(16, 3, 3, 3).astype(np.float32)
+        x = cp.random.randn(1, 3, 32, 32).astype(cp.float32)
+        w = cp.random.randn(16, 3, 3, 3).astype(cp.float32)
         out = op_conv([x, w], {
             "kernel_shape": [3, 3],
             "pads": [0, 0, 0, 0],
@@ -287,29 +286,29 @@ class C35OperatorTests(unittest.TestCase):
 
     def test_gather(self) -> None:
         from c35.engine import op_gather
-        x = np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], dtype=np.float32)
-        indices = np.array([0, 2], dtype=np.int64)
+        x = cp.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]], dtype=cp.float32)
+        indices = cp.array([0, 2], dtype=cp.int64)
         out = op_gather([x, indices], {"axis": 0})
-        np.testing.assert_array_equal(out, np.array([[1.0, 2.0], [5.0, 6.0]], dtype=np.float32))
+        cp.testing.assert_array_equal(out, cp.array([[1.0, 2.0], [5.0, 6.0]], dtype=cp.float32))
 
     def test_gather_with_batch(self) -> None:
         from c35.engine import op_gather
-        x = np.random.randn(1, 14, 128).astype(np.float32)
-        indices = np.array([[0, 1, 2]], dtype=np.int64)
+        x = cp.random.randn(1, 14, 128).astype(cp.float32)
+        indices = cp.array([[0, 1, 2]], dtype=cp.int64)
         out = op_gather([x, indices], {"axis": 1})
         self.assertEqual(out.shape, (1, 1, 3, 128))
 
     def test_reshape_with_neg_one(self) -> None:
         from c35.engine import op_reshape
-        x = np.random.randn(1, 18, 128).astype(np.float32)
-        shape = np.array([-1, 18, 4, 32], dtype=np.int64)
+        x = cp.random.randn(1, 18, 128).astype(cp.float32)
+        shape = cp.array([-1, 18, 4, 32], dtype=cp.int64)
         out = op_reshape([x, shape], {"allowzero": 0})
         self.assertEqual(out.shape, (1, 18, 4, 32))
 
     def test_split_three_way(self) -> None:
         from c35.engine import op_split
-        x = np.random.randn(1, 18, 384).astype(np.float32)
-        out = op_split([x, np.array([])], {"axis": -1, "_num_outputs": 3})
+        x = cp.random.randn(1, 18, 384).astype(cp.float32)
+        out = op_split([x, cp.array([])], {"axis": -1, "_num_outputs": 3})
         self.assertEqual(len(out), 3)
         self.assertEqual(out[0].shape, (1, 18, 128))
         self.assertEqual(out[1].shape, (1, 18, 128))
@@ -321,7 +320,7 @@ class C35OperatorTests(unittest.TestCase):
         original_xp = engine.xp
 
         class StrictArrayModule:
-            float32 = np.float32
+            float32 = cp.float32
 
             @staticmethod
             def split(value, indices, axis=0):
@@ -329,11 +328,11 @@ class C35OperatorTests(unittest.TestCase):
                     type(index) is int for index in indices
                 ):
                     raise TypeError("indices must be Python integers")
-                return np.split(value, indices, axis=axis)
+                return cp.split(value, indices, axis=axis)
 
         try:
             engine.xp = StrictArrayModule()
-            x = np.arange(12, dtype=np.float32).reshape(1, 12)
+            x = cp.arange(12, dtype=cp.float32).reshape(1, 12)
             out = engine.op_split([x], {"axis": 1, "split": [3, 4, 5]})
         finally:
             engine.xp = original_xp
@@ -341,13 +340,13 @@ class C35OperatorTests(unittest.TestCase):
 
     def test_transpose(self) -> None:
         from c35.engine import op_transpose
-        x = np.random.randn(1, 4, 18, 32).astype(np.float32)
+        x = cp.random.randn(1, 4, 18, 32).astype(cp.float32)
         out = op_transpose([x], {"perm": [0, 2, 1, 3]})
         self.assertEqual(out.shape, (1, 18, 4, 32))
 
     def test_erf(self) -> None:
         from c35.engine import op_erf
-        x = np.array([-2.0, -1.0, 0.0, 1.0, 2.0], dtype=np.float32)
+        x = cp.array([-2.0, -1.0, 0.0, 1.0, 2.0], dtype=cp.float32)
         out = op_erf([x], {})
         # erf(0) = 0
         self.assertAlmostEqual(float(out[2]), 0.0, places=4)
@@ -357,14 +356,14 @@ class C35OperatorTests(unittest.TestCase):
 
     def test_global_average_pool(self) -> None:
         from c35.engine import op_global_average_pool
-        x = np.ones((1, 64, 8, 8), dtype=np.float32)
+        x = cp.ones((1, 64, 8, 8), dtype=cp.float32)
         out = op_global_average_pool([x], {})
         self.assertEqual(out.shape, (1, 64, 1, 1))
-        np.testing.assert_allclose(out, 1.0, rtol=1e-5)
+        cp.testing.assert_allclose(out, 1.0, rtol=1e-5)
 
     def test_flatten(self) -> None:
         from c35.engine import op_flatten
-        x = np.random.randn(1, 64, 1, 1).astype(np.float32)
+        x = cp.random.randn(1, 64, 1, 1).astype(cp.float32)
         out = op_flatten([x], {"axis": 1})
         self.assertEqual(out.shape, (1, 64))
 

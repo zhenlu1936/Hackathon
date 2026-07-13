@@ -1,8 +1,8 @@
-"""C3.5 graph executor for the selected array backend.
+"""C3.5 CuPy graph executor.
 
 Manages the tensor value dictionary, loads weights from ONNX initializers,
-and executes nodes in topological order using CuPy by default from the CLI.
-This CUDA reference path is not the contest AEC runtime.
+and executes nodes in topological order using CuPy.
+The remote H200 GPU is the designated AEC execution device.
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ import copy
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-import numpy as np
+import cupy as cp
 import onnx
 
 from c3common.ir.graph import Graph, Node
@@ -19,42 +19,41 @@ from c34.execution_plan import ExecutionPlan
 from c35 import engine
 
 
-def _extract_initializer_data(model_path: str) -> Dict[str, np.ndarray]:
-    """Extract all initializer tensors from an ONNX model as numpy arrays.
+def _extract_initializer_data(model_path: str) -> Dict[str, cp.ndarray]:
+    """Extract ONNX initializer tensors and move them directly to CuPy.
 
     Args:
         model_path: Path to the .onnx file.
 
     Returns:
-        Dict mapping initializer name -> numpy array.
+        Dict mapping initializer name to a CuPy array.
     """
     model = onnx.load(model_path)
-    weights: Dict[str, np.ndarray] = {}
+    weights: Dict[str, cp.ndarray] = {}
     for init in model.graph.initializer:
-        arr = onnx.numpy_helper.to_array(init)
-        weights[init.name] = arr
+        weights[init.name] = cp.asarray(onnx.numpy_helper.to_array(init))
     return weights
 
 
-def _extract_constant_values(model_path: str) -> Dict[str, np.ndarray]:
+def _extract_constant_values(model_path: str) -> Dict[str, cp.ndarray]:
     """Extract constant tensor values from ONNX Constant nodes.
 
     Constant nodes store their value as the 'value' attribute.
-    We map each constant-node output name to its numpy array.
+    We map each constant-node output name to its CuPy array.
 
     Args:
         model_path: Path to the .onnx file.
 
     Returns:
-        Dict mapping constant output tensor name -> numpy array.
+        Dict mapping constant output tensor name to a CuPy array.
     """
     model = onnx.load(model_path)
-    constants: Dict[str, np.ndarray] = {}
+    constants: Dict[str, cp.ndarray] = {}
     for node in model.graph.node:
         if node.op_type == "Constant":
             for attr in node.attribute:
                 if attr.name == "value" and attr.t.data_type:
-                    arr = onnx.numpy_helper.to_array(attr.t)
+                    arr = cp.asarray(onnx.numpy_helper.to_array(attr.t))
                     for out_name in node.output:
                         constants[out_name] = arr
                     break
@@ -63,10 +62,10 @@ def _extract_constant_values(model_path: str) -> Dict[str, np.ndarray]:
                 for attr in node.attribute:
                     if attr.name == "value_float":
                         for out_name in node.output:
-                            constants[out_name] = np.array(attr.f, dtype=np.float32)
+                            constants[out_name] = cp.array(attr.f, dtype=cp.float32)
                     elif attr.name == "value_int":
                         for out_name in node.output:
-                            constants[out_name] = np.array(attr.i, dtype=np.int64)
+                            constants[out_name] = cp.array(attr.i, dtype=cp.int64)
     return constants
 
 
@@ -101,11 +100,11 @@ class GraphExecutor:
         }
         self.values: Dict[str, Any] = {}
 
-    def run(self, feed_dict: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+    def run(self, feed_dict: Dict[str, cp.ndarray]) -> Dict[str, cp.ndarray]:
         """Execute the full graph.
 
         Args:
-            feed_dict: Dict mapping graph input name -> numpy array.
+            feed_dict: Dict mapping graph input name to a CuPy array.
                        Keys must match graph.inputs tensor names.
 
         Returns:
@@ -125,7 +124,7 @@ class GraphExecutor:
             self._execute_node(node)
 
         # Collect outputs
-        outputs: Dict[str, np.ndarray] = {}
+        outputs: Dict[str, cp.ndarray] = {}
         for out_tensor in self.graph.outputs:
             name = out_tensor.name
             if name in self.values:
@@ -162,11 +161,14 @@ class GraphExecutor:
             return
 
         # Resolve inputs
-        inputs: List[np.ndarray] = []
+        inputs: List[Any] = []
         for inp_name in node.inputs:
             if not inp_name:
-                # Empty optional input — skip it for operators that can handle it
-                inputs.append(engine.to_device(np.float32(0.0)))
+                # Optional input omitted — pass None so operators that check
+                # for it (Gemm C, Conv B, LayerNorm B, etc.) can handle the
+                # absence type-agnostically instead of receiving a scalar FP32
+                # zero that may be the wrong dtype or shape.
+                inputs.append(None)
                 continue
             if inp_name not in self.values:
                 raise KeyError(
@@ -208,18 +210,18 @@ class GraphExecutor:
 class PlannedGraphExecutor(GraphExecutor):
     """Reference executor whose node order is authorized by a C3.4 plan.
 
-    The plan contains decomposed C3.2 kernel steps.  This array reference still
-    evaluates each high-level node with CuPy/NumPy, but it refuses to execute unless
+    The plan contains decomposed C3.2 kernel steps. This array executor still
+    evaluates each high-level node with CuPy, but it refuses to execute unless
     every planned kernel binding/event is valid and every optimized graph node
     is represented in the plan.  It therefore connects and tests the compiler
-    stages without pretending to be the unavailable AEC device runtime.
+    stages while executing numerical operators on the designated AEC H200.
     """
 
     def run_planned(
         self,
-        feed_dict: Dict[str, np.ndarray],
+        feed_dict: Dict[str, cp.ndarray],
         plan: ExecutionPlan,
-    ) -> Dict[str, np.ndarray]:
+    ) -> Dict[str, cp.ndarray]:
         issues = plan.validate()
         if issues:
             raise ValueError(
@@ -258,7 +260,7 @@ class PlannedGraphExecutor(GraphExecutor):
         for node_id in planned_node_order:
             self._execute_node(self.graph.nodes[node_id])
 
-        outputs: Dict[str, np.ndarray] = {}
+        outputs: Dict[str, cp.ndarray] = {}
         for out_tensor in self.graph.outputs:
             if out_tensor.name not in self.values:
                 raise KeyError(f"Planned graph did not produce '{out_tensor.name}'")
@@ -267,7 +269,7 @@ class PlannedGraphExecutor(GraphExecutor):
 
 
 class CrossStageReferencePipeline:
-    """Connected C3.1→C3.5 FP32 reference pipeline.
+    """Connected C3.1→C3.5 FP32 deployment pipeline.
 
     C3.3 mutates an imported C3.1 graph, C3.4 consumes its C3.2 lowering, and
     :class:`PlannedGraphExecutor` consumes the resulting plan.  The first
@@ -308,7 +310,7 @@ class CrossStageReferencePipeline:
             self._plan_cache[batch_size] = plan
         return self._plan_cache[batch_size]
 
-    def run(self, feed_dict: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+    def run(self, feed_dict: Dict[str, cp.ndarray]) -> Dict[str, cp.ndarray]:
         batch_sizes = {arr.shape[0] for arr in feed_dict.values() if arr.ndim > 0}
         if len(batch_sizes) != 1:
             raise ValueError("All graph inputs must have the same batch dimension")
@@ -362,7 +364,6 @@ def load_and_infer(
     input_dir: str,
     output_dir: str,
     batch_size: Optional[int] = None,
-    backend: str = "cupy",
     qualify_optimizations: bool = False,
 ) -> Dict[str, Any]:
     """Load model, run inference, and write outputs.
@@ -374,7 +375,6 @@ def load_and_infer(
         input_dir: Directory containing manifest.json and .npy input files.
         output_dir: Directory to write outputs (manifest.json + logits.npy).
         batch_size: Maximum batch size for processing. None means process all at once.
-        backend: ``cupy`` for CUDA execution or explicit ``numpy`` reference mode.
         qualify_optimizations: Compare the first optimized batch with an unfused run.
 
     Returns:
@@ -386,7 +386,7 @@ def load_and_infer(
     from c31.import_onnx import import_onnx
 
     t_start = time.perf_counter()
-    engine.configure_backend(backend)
+    engine.require_device()
 
     # 1. Load ONNX graph
     t_parse_start = time.perf_counter()
@@ -401,7 +401,7 @@ def load_and_infer(
     with open(input_manifest_path, "r") as f:
         input_manifest = json.load(f)
 
-    input_arrays: Dict[str, np.ndarray] = {}
+    input_arrays: Dict[str, cp.ndarray] = {}
     input_meta: Dict[str, Dict[str, Any]] = {}
     for entry in input_manifest.get("tensors", []):
         name = entry["name"]
@@ -411,9 +411,9 @@ def load_and_infer(
         file_path = os.path.join(input_dir, file_name)
         if not os.path.isfile(file_path):
             raise FileNotFoundError(f"Input file not found: {file_path}")
-        arr = np.load(file_path)
+        arr = cp.load(file_path, allow_pickle=False)
         declared_dtype = entry.get("dtype")
-        if declared_dtype is not None and np.dtype(declared_dtype) != arr.dtype:
+        if declared_dtype is not None and cp.dtype(declared_dtype) != arr.dtype:
             raise ValueError(
                 f"Input '{name}' dtype mismatch: manifest={declared_dtype}, "
                 f"npy={arr.dtype}"
@@ -444,12 +444,12 @@ def load_and_infer(
         )
 
     dtype_map = {
-        "FLOAT": np.dtype("float32"),
-        "FLOAT16": np.dtype("float16"),
-        "DOUBLE": np.dtype("float64"),
-        "INT32": np.dtype("int32"),
-        "INT64": np.dtype("int64"),
-        "BOOL": np.dtype("bool"),
+        "FLOAT": cp.dtype("float32"),
+        "FLOAT16": cp.dtype("float16"),
+        "DOUBLE": cp.dtype("float64"),
+        "INT32": cp.dtype("int32"),
+        "INT64": cp.dtype("int64"),
+        "BOOL": cp.dtype("bool"),
     }
     for name, tensor in expected_inputs.items():
         arr = input_arrays[name]
@@ -490,12 +490,12 @@ def load_and_infer(
     else:
         actual_batch = min(batch_size, total_samples)
 
-    # 5. Compile the connected C3.3/C3.4 reference pipeline and run batches.
+    # 5. Compile the connected C3.3/C3.4 deployment pipeline and run batches.
     executor = CrossStageReferencePipeline(
         graph, model_path, qualify_optimizations=qualify_optimizations
     )
     output_name = graph.outputs[0].name if graph.outputs else "logits"
-    all_outputs: List[np.ndarray] = []
+    all_outputs: List[cp.ndarray] = []
 
     t_infer_start = time.perf_counter()
 
@@ -503,7 +503,7 @@ def load_and_infer(
         end = min(start + actual_batch, total_samples)
 
         # Slice inputs
-        batch_feed: Dict[str, np.ndarray] = {}
+        batch_feed: Dict[str, cp.ndarray] = {}
         for name, arr in input_arrays.items():
             batch_feed[name] = engine.to_device(arr[start:end])
 
@@ -518,15 +518,13 @@ def load_and_infer(
     )
     engine.synchronize()
     t_infer_end = time.perf_counter()
-    final_output = np.ascontiguousarray(engine.to_host(final_device_output))
-
     # 7. Validate output
-    if final_output.shape[0] != total_samples:
+    if final_device_output.shape[0] != total_samples:
         raise ValueError(
-            f"Output sample count mismatch: got {final_output.shape[0]}, "
+            f"Output sample count mismatch: got {final_device_output.shape[0]}, "
             f"expected {total_samples}"
         )
-    if not np.all(np.isfinite(final_output)):
+    if not bool(cp.all(cp.isfinite(final_device_output)).item()):
         raise ValueError("Output contains non-finite values (NaN or Inf)")
 
     # 8. Write outputs
@@ -535,7 +533,7 @@ def load_and_infer(
     # Write logits.npy
     output_file = "logits.npy"
     output_path = os.path.join(output_dir, output_file)
-    np.save(output_path, final_output)
+    cp.save(output_path, final_device_output)
 
     # Write manifest.json
     output_manifest = {
@@ -544,7 +542,7 @@ def load_and_infer(
                 "name": output_name,
                 "file": output_file,
                 "dtype": "float32",
-                "shape": list(final_output.shape),
+                "shape": list(final_device_output.shape),
             }
         ]
     }
@@ -560,10 +558,10 @@ def load_and_infer(
         "input_dir": input_dir,
         "output_dir": output_dir,
         "batch_size": actual_batch,
-        "backend": engine.backend_name(),
+        "backend": "cupy",
         "backend_evidence": engine.runtime_evidence(),
         "total_samples": total_samples,
-        "output_shape": list(final_output.shape),
+        "output_shape": list(final_device_output.shape),
         "parse_time_s": t_parse_end - t_parse_start,
         "infer_time_s": t_infer_end - t_infer_start,
         "total_time_s": t_end - t_start,

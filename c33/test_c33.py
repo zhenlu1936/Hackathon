@@ -766,11 +766,14 @@ def print_summary() -> None:
     ]
 
     for name, s, mx in categories:
-        total += s
-        stars = "\u2605" * int(round(s * 5)) + "\u2606" * int(round(mx * 5 - s * 5))
-        print(f"  {name}: {s:.2f}/{mx} {stars}")
+        capped = min(s, mx)
+        total += capped
+        stars = "\u2605" * int(round(capped * 5)) + "\u2606" * int(round(mx * 5 - capped * 5))
+        print(f"  {name}: {capped:.2f}/{mx} {stars}")
+    maximum = 8.6
+    total = min(total, maximum)
     print(f"  {'\u2500' * 13}")
-    print(f"  TOTAL: {total:.2f}/8.6")
+    print(f"  TOTAL: {total:.2f}/{maximum}")
     print(f"  {'PASS' if FAIL == 0 else 'SOME FAILURES'} "
           f"(PASS={PASS}, FAIL={FAIL})")
     print()

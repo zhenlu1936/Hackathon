@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 import unittest
 
-import numpy as np
+import cupy as cp
 
 from c31.import_onnx import import_onnx
 from c35.executor import CrossStageReferencePipeline
@@ -20,11 +20,11 @@ TESTDATA = (
 
 
 class CrossStagePipelineTests(unittest.TestCase):
-    def _feed(self, model: str, count: int = 2) -> dict[str, np.ndarray]:
+    def _feed(self, model: str, count: int = 2) -> dict[str, cp.ndarray]:
         input_dir = TESTDATA / f"{model}_v1" / "input"
         manifest = json.loads((input_dir / "manifest.json").read_text())
         return {
-            entry["name"]: np.load(input_dir / entry["file"])[:count]
+            entry["name"]: cp.load(input_dir / entry["file"])[:count]
             for entry in manifest["tensors"]
         }
 

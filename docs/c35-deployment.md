@@ -1,18 +1,27 @@
 # C3.5 — Typical model deployment
 
-## Objective and scoring
+## Release contract and scoring
 
 C3.5 is half the contest score. Each model must pass strict numerical comparison and, for classifiers, accuracy before runtime or memory ranking matters. The written rules allocate 15 points to correctness/accuracy, 25 to total runtime, and 10 to peak GPU memory.
 
 The evaluator times the whole process from startup to exit and samples per-process GPU memory through NVML, including child processes. Startup, imports, model parsing, compilation, file I/O, and teardown therefore all matter.
 
-Inference must run on the required AEC GPGPU path. A CPU, PyTorch, ONNX Runtime, CUDA, or mock backend may be used as a disclosed development reference, but cannot silently substitute for the submitted AEC implementation. The timed command must build/load only disclosed submission components, perform no network access, and generate outputs from the supplied model and inputs at evaluation time.
+Inference runs exclusively through native CuPy/CUDA on the remote H200, which
+is the designated AEC device for this release. No CPU array fallback is part of
+the framework. The timed command performs no network access and generates
+outputs from supplied inputs.
 
-Current implementation note: CuPy/CUDA is the default connected reference backend. It applies C3.3 to the shared graph, builds the C3.4 plan through C3.2 decomposition, validates complete bindings/events and plan/graph identity, and executes nodes in planned order. Weights and batches move to CuPy once and final outputs return to the host once. Optional `--qualify-optimizations` compares the first optimized batch against unfused FP32; it is disabled for scored timing. `--backend numpy` is an explicit development-only mode. Neither backend is AEC execution.
+The released implementation uses CuPy/CUDA as its only connected H200
+backend. It applies C3.3 to the shared graph, builds the C3.4 plan through C3.2
+decomposition, validates bindings/events and plan/graph identity, and executes
+nodes in planned order. Weights and batches move to CuPy once and final outputs
+return to the host once. Numerical qualification remains an internal test path
+and is not exposed through the evaluator-facing CLI.
+The CLI exposes no backend selector; CuPy is the mandatory implementation.
 
 ## CLI and data contract
 
-Support:
+The deployment CLI is:
 
 ```text
 <program> --onnx MODEL --input INPUT_DIR --output OUTPUT_DIR [--batch-size N]
@@ -36,12 +45,14 @@ Implement ONNX opset-17 semantics, including broadcasting, axes, transposition, 
 
 ## Correctness gates
 
-- All models: `numpy.allclose(out, golden, rtol=1e-3, atol=1e-3)`.
+- All models: `cupy.allclose(out, golden, rtol=1e-3, atol=1e-3)`.
 - MLP: top-1 accuracy at least 98%.
 - ResNet: top-1 accuracy at least 85%.
 - Transformer: no classification threshold, but the numerical gate still applies.
 
-Start with FP32 and disable TF32. A model should have an automatic fallback to the known-good path when an optimized kernel or low-precision policy fails qualification.
+The release uses FP32 operator computation and disables unqualified deployment
+precision changes. Optimizations must pass the same golden thresholds before
+becoming part of the default path.
 
 ## Batch execution
 
@@ -56,9 +67,9 @@ Treat `--batch-size` as a maximum processing chunk:
 
 Do not require 10,000 samples or a particular batch size. Test `N` smaller than, equal to, and not divisible by the requested batch size.
 
-## Performance strategy
+## Performance characteristics
 
-Optimize in this order:
+The implementation is organized around these performance constraints:
 
 1. Eliminate repeated model parsing, compilation, allocation, and weight uploads inside the batch loop.
 2. Use pinned host buffers and asynchronous copies where they improve end-to-end time.
@@ -101,17 +112,21 @@ Before exit, validate:
 - Excessive batch size improves throughput but loses memory ranking.
 - A hidden weight set exposes hardcoded shapes, names, or constant assumptions.
 - Output file generation becomes a significant part of measured wall time, especially Transformer logits.
-- An undeclared fallback backend makes results accurate but violates the required AEC execution path.
+- An undeclared CPU fallback makes results accurate but bypasses the required H200 execution path.
 - Build/runtime dependencies are unavailable because evaluation has no network access.
 
 ## Standards-oriented execution
 
-Use `python3 -m c35.standard_runner` or `./run_c35_standard.sh` for black-box validation against released manifests, per-model thresholds, cold wall time, and NVML process-tree memory. `c35/test_c35.py` remains a broader development regression suite and is not equivalent to the unreleased organizer evaluator. See [C3.5 standard black-box runner](c35-standard-runner.md).
+Use `python3 -m c35.standard_runner` or `./run_c35.sh` for black-box validation
+against released manifests, per-model thresholds, cold wall time, and GPU-memory
+evidence. `c35/test_c35.py` is the local development regression suite and is not a
+replica of the unreleased organizer evaluator. See
+[C3.5 standard black-box runner](c35-standard-runner.md).
 
 On the GPU server, the normal workflow is one command:
 
 ```bash
-./run_c35_standard.sh
+./run_c35.sh
 ```
 
-It checks release-data presence, performs a real CuPy device smoke test, runs all three models in fresh subprocesses, samples memory using `pynvml`, `nvidia-smi`, or a process-local CuPy-pool fallback on restrictive MIG systems, applies golden/accuracy gates, and writes `c35-standard-report.json`. Set `PYTHON`, `C35_REPORT`, or `COMMAND_TEMPLATE` only when overriding those defaults.
+It checks release-data presence, performs a real CuPy device smoke test, runs all three models in fresh subprocesses, samples memory using the server-native `nvidia-smi` command or a process-local CuPy-pool fallback on restrictive MIG systems, applies golden/accuracy gates, and writes `c35-standard-report.json`. Set `PYTHON`, `C35_REPORT`, or `COMMAND_TEMPLATE` only when overriding those defaults.

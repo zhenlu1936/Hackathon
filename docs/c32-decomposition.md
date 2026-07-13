@@ -1,6 +1,6 @@
 # C3.2 — Operator decomposition and kernel selection
 
-## Objective and evaluator contract
+## Release contract
 
 For every imported node, select a supported precision, lower the high-level operator into a non-empty GPGPU kernel sequence, expose intermediate tensors, and provide valid launch parameters. The evaluator reads only public APIs:
 
@@ -79,16 +79,15 @@ The hardware object must be the source of truth for precision, thread, shared-me
 
 Do not hardcode a high-end GPU profile to claim capabilities. Load the fixed evaluator/AEC target profile through documented configuration or device query, validate it, and fail clearly when a requested precision or kernel is unavailable.
 
-## Implementation order
+## Implementation coverage
 
-1. Implement a safe non-empty lowering for all 17 public operators.
-2. Implement complete MatMul/Gemm and Conv paths.
-3. Implement the exact Softmax and LayerNorm decompositions with named intermediates.
-4. Add generic, always-valid tuning defaults.
-5. Add hardware-aware precision and specialized tuning.
-6. Add fp8/fp4 coverage only after FP32 correctness is locked.
+The release includes non-empty lowering for all 17 public operators, complete
+MatMul/Gemm and Conv paths, named Softmax and LayerNormalization intermediates,
+generic valid tuning defaults, and hardware-aware mixed-precision selection.
+FP8/FP4 coverage remains structural until executable AEC kernels are connected
+and numerically qualified.
 
-## Acceptance evidence
+## Validation evidence
 
 - Per-node report: selected precision, supported-precision intersection, kernel sequence, intermediates, and tuning.
 - Coverage summary for D1–D5 using the rubric formulas.
@@ -96,7 +95,7 @@ Do not hardcode a high-end GPU profile to claim capabilities. Load the fixed eva
 - Numerical comparison of the FULL_FP32 decomposition against the reference.
 - Evidence that every emitted kernel name resolves to submitted source and executes through the AEC path.
 - Repeated-call determinism checks for precision, decomposition, and tuning.
-- Offline dependency and originality disclosures for any kernel library or generated implementation.
+- Native-server dependency and originality disclosures for any kernel library or generated implementation.
 
 Current structural evidence: all 13 released sensitive nodes select FP32; all 49 tunable nodes select a declared-supported precision; fp32/fp16/fp8/fp4 all appear; and five independent policy regressions pass. This is routing/decomposition evidence, not proof that FP8/FP4 AEC kernels meet end-to-end accuracy.
 

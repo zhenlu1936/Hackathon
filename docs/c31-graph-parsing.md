@@ -1,12 +1,15 @@
 # C3.1 — Computation graph parsing and representation
 
-## Objective and scoring
+## Release contract
 
 Load an arbitrary supplied ONNX file and export a valid DAG JSON. The 10 points split into model loading (4) and correct graph parsing (6). The command must accept `--onnx` and `--output`, write only to the requested output path, and exit with code 0 on success.
 
-The parser must be model-general: never special-case public filenames, graph names, tensor hashes, fixed weights, or the three released model instances. Generate DAG JSON at evaluation time from the supplied ONNX file. Declare the ONNX/protobuf dependencies and package them for offline installation.
+The parser is model-general: it does not special-case public filenames, graph
+names, tensor hashes, fixed weights, or released model instances. DAG JSON is
+generated at evaluation time from the supplied ONNX file. ONNX and protobuf
+must be provided natively by the evaluation server.
 
-## Required work
+## Released implementation
 
 1. Load and validate the ONNX protobuf, including opset information.
 2. Separate true graph inputs from initializers; weights must not appear in `graph_inputs`.
@@ -26,7 +29,7 @@ The parser must be model-general: never special-case public filenames, graph nam
 - `Reshape`, `Split`, `Transpose`, and broadcasting operators require attributes and/or constant inputs later, so do not discard these during a C3.1-only export.
 - A graph output can be produced directly by a node and need not have a consumer edge.
 
-## Design recommendation
+## Internal representation
 
 Build the rich internal IR first, then serialize a projection of it. Maintain these indexes:
 
@@ -38,7 +41,7 @@ node_by_id[node_id] -> Node
 
 This makes C3.3 validation and C3.4 lifetime analysis direct extensions of C3.1 rather than separate re-parsing implementations.
 
-## Acceptance tests
+## Validation
 
 - Run the CLI on all three public ONNX files.
 - Parse the produced JSON with a strict JSON parser.
@@ -49,7 +52,7 @@ This makes C3.3 validation and C3.4 lifetime analysis direct extensions of C3.1 
 - Assert topological sorting visits every node exactly once.
 - Repeat an export and compare bytes or normalized JSON for determinism.
 
-## Failure modes that lose points
+## Contract violations
 
 - Treating weights as user inputs.
 - Building edges by adjacency instead of tensor producer/consumer relationships.

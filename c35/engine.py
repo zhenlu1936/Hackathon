@@ -1,9 +1,7 @@
 """C3.5 array compute engine — ONNX operator implementations.
 
-Implements all 17 required ONNX operators with opset-17 semantics.
-The deployment CLI configures CuPy so numerical work stays on the CUDA device.
-NumPy is retained only as an explicit development/reference backend for unit
-tests and machines without CUDA.  Neither backend is the required AEC runtime.
+Implements all 17 required ONNX operators with opset-17 semantics. Numerical
+work uses CuPy exclusively on the designated remote H200 AEC device.
 
 Operators implemented:
     Flatten, Gemm, Relu, Conv, Add, GlobalAveragePool, Gather,
@@ -16,56 +14,23 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, List, Optional, Tuple
 
-import numpy as np
+import cupy as cp
 
-# Unit tests import operator functions directly, so NumPy is the conservative
-# module default.  ``c35.executor.load_and_infer`` must call
-# ``configure_backend`` before constructing an executor; the deployment CLI
-# defaults that call to CuPy and never falls back silently.
-xp = np
-_BACKEND_NAME = "numpy"
+xp = cp
 
-
-def configure_backend(name: str) -> Any:
-    """Select the numerical array module and return it.
-
-    CuPy import/device failures are intentionally propagated.  A server run
-    requested with ``cupy`` must not quietly become a CPU run.
-    """
-    global xp, _BACKEND_NAME
-    normalized = name.strip().lower()
-    if normalized == "numpy":
-        xp = np
-    elif normalized == "cupy":
-        try:
-            import cupy as cp
-        except ImportError as exc:
-            raise RuntimeError(
-                "CuPy backend requested but cupy is not installed; install the "
-                "target environment dependency or use --backend numpy only for "
-                "an explicitly disclosed development run"
-            ) from exc
-        if cp.cuda.runtime.getDeviceCount() < 1:
-            raise RuntimeError("CuPy backend requested but no CUDA device is visible")
-        xp = cp
-    else:
-        raise ValueError(f"Unsupported backend '{name}'; expected cupy or numpy")
-    _BACKEND_NAME = normalized
-    return xp
-
-
-def backend_name() -> str:
-    return _BACKEND_NAME
+def require_device() -> None:
+    """Fail closed when the mandatory CuPy CUDA device is unavailable."""
+    if cp.cuda.runtime.getDeviceCount() < 1:
+        raise RuntimeError("CuPy requires a visible CUDA device")
 
 
 def to_device(value: Any) -> Any:
     return xp.asarray(value)
 
 
-def to_host(value: Any) -> np.ndarray:
-    if _BACKEND_NAME == "cupy":
-        return xp.asnumpy(value)
-    return np.asarray(value)
+def to_host(value: Any) -> Any:
+    """Copy device data to host only for serialization or control metadata."""
+    return cp.asnumpy(value)
 
 
 def array_module() -> Any:
@@ -77,8 +42,7 @@ def ascontiguousarray(value: Any, dtype: Any = None) -> Any:
 
 
 def synchronize() -> None:
-    if _BACKEND_NAME == "cupy":
-        xp.cuda.get_current_stream().synchronize()
+    xp.cuda.get_current_stream().synchronize()
 
 
 def runtime_evidence() -> Dict[str, Any]:
@@ -88,9 +52,7 @@ def runtime_evidence() -> Dict[str, Any]:
     process-local high-water proxy even when MIG hides the process from
     ``nvidia-smi --query-compute-apps``.
     """
-    evidence: Dict[str, Any] = {"backend": _BACKEND_NAME}
-    if _BACKEND_NAME != "cupy":
-        return evidence
+    evidence: Dict[str, Any] = {"backend": "cupy"}
     device = xp.cuda.Device()
     properties = xp.cuda.runtime.getDeviceProperties(device.id)
     name = properties.get("name", "unknown")
@@ -107,14 +69,8 @@ def runtime_evidence() -> Dict[str, Any]:
     return evidence
 
 # ── Erf implementation ──────────────────────────────────────────────
-# Rational Chebyshev approximation for the error function.
+# Rational approximation for the error function.
 # Accurate to ~1e-7, no scipy dependency required.
-
-_ERF_A = xp.float32(0.278393)
-_ERF_B = xp.float32(0.230389)
-_ERF_C = xp.float32(0.000972)
-_ERF_D = xp.float32(0.078108)
-
 
 def _erf_approx(x: xp.ndarray) -> xp.ndarray:
     """Rational approximation of erf(x) for all real x.
@@ -132,7 +88,10 @@ def _erf_approx(x: xp.ndarray) -> xp.ndarray:
     t4 = t3 * t
     t5 = t4 * t
 
-    coeffs = xp.float32([0.254829592, -0.284496736, 1.421413741, -1.453152027, 1.061405429])
+    coeffs = xp.asarray(
+        [0.254829592, -0.284496736, 1.421413741, -1.453152027, 1.061405429],
+        dtype=xp.float32,
+    )
     poly = coeffs[0]*t + coeffs[1]*t2 + coeffs[2]*t3 + coeffs[3]*t4 + coeffs[4]*t5
 
     return sign * (1.0 - poly * xp.exp(-x * x))
@@ -238,7 +197,7 @@ def op_conv(inputs: List[xp.ndarray], attrs: Dict[str, Any]) -> xp.ndarray:
     x_padded = xp.pad(x, ((0, 0), (0, 0), (pHT, pHB), (pWL, pWR)),
                       mode='constant', constant_values=0)
 
-    # Use sliding_window_view for clean im2col (numpy >= 1.20)
+    # Use CuPy sliding_window_view for clean im2col.
     # Extract spatial windows: (N, C, H_out, W_out, kH, kW)
     try:
         patches = xp.lib.stride_tricks.sliding_window_view(
@@ -447,7 +406,7 @@ def op_reshape(inputs: List[xp.ndarray], attrs: Dict[str, Any]) -> xp.ndarray:
     # Shape metadata is tiny and drives Python control flow.  Copying it to the
     # host avoids scalar-by-scalar CUDA synchronization and gives ``reshape`` a
     # normal tuple of Python integers.
-    target_shape_raw = to_host(inputs[1]).astype(np.int64, copy=False).tolist()
+    target_shape_raw = to_host(inputs[1]).astype("int64", copy=False).tolist()
 
     allowzero = int(attrs.get("allowzero", 0))
 
@@ -674,6 +633,31 @@ def op_fused_residual_norm(inputs: List[xp.ndarray], attrs: Dict[str, Any]) -> x
     return op_layer_normalization(ln_inputs, attrs)
 
 
+def op_fused_compute_activation(inputs: List[xp.ndarray],
+                                attrs: Dict[str, Any]) -> xp.ndarray:
+    """FusedComputeActivation: compute op followed by activation (Relu/Erf).
+
+    ``attrs['_inner_op']`` is the original compute op type.
+    ``attrs['_activation']`` is the activation function to apply.
+    All other attributes (including compute op attributes) are forwarded.
+    """
+    inner_op = attrs.get("_inner_op", "")
+    activation = attrs.get("_activation", "")
+
+    impl = OP_DISPATCH.get(inner_op)
+    if impl is None:
+        raise ValueError(f"Unknown inner compute op in FusedComputeActivation: {inner_op}")
+    result = impl(inputs, attrs)
+
+    act_impl = OP_DISPATCH.get(activation)
+    if act_impl is None:
+        raise ValueError(f"Unknown activation in FusedComputeActivation: {activation}")
+    # Pass activation-specific attributes from the original node
+    act_attrs = dict(attrs.get("_activation_attrs", {}))
+    # For Relu there are no attributes beside the input
+    return act_impl([result], act_attrs)
+
+
 # Copy of dispatch for FusedEWChain internal use (avoid circular import)
 _OP_DISPATCH = {
     "Add": op_add,
@@ -712,5 +696,6 @@ _FUSED_DISPATCH = {
     "FusedEWChain": op_fused_ew_chain,
     "FusedSoftmaxDropout": op_fused_softmax_dropout,
     "FusedResidualNorm": op_fused_residual_norm,
+    "FusedComputeActivation": op_fused_compute_activation,
 }
 OP_DISPATCH.update(_FUSED_DISPATCH)

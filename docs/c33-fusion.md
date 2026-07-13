@@ -1,6 +1,6 @@
 # C3.3 — Operator fusion and graph optimization
 
-## Objective
+## Release contract
 
 Run `GraphPassPipeline(enable_fusion=True, ...)`, produce a validated optimized graph, and expose each matched transformation in `pass_results['Fusion']['stats']['fusion_log']`. Optimize without changing graph inputs, outputs, or FP32 results.
 
@@ -16,7 +16,9 @@ Match graph semantics, never public model identity. Fusion rules must not inspec
 | `FusedSoftmaxDropout` | Softmax -> Dropout | inference semantics; Dropout must not be training-active |
 | `FusedResidualNorm` | residual Add -> LayerNorm | correct residual inputs, axis, epsilon, scale, and bias |
 
-Each fusion log entry should record pattern, old node IDs, new node ID, removed tensors, and rejection reason when a near-match is unsafe. Deterministic logs simplify evaluator debugging.
+Each fusion log entry records the pattern, old node IDs, new node ID, removed
+tensors, and a rejection reason when a near-match is unsafe. Log ordering and
+generated IDs are deterministic.
 
 ## Critical BN issue
 
@@ -28,7 +30,8 @@ The specification suggests a pre-fusion pass that reconstructs a merged Conv fro
 - a synthetic microbenchmark graph containing Conv and BN;
 - organizer acceptance through code review of a correct Conv+BN folding pass.
 
-Implement standard Conv+BN folding when parameters exist, and document this released-model limitation.
+The release implements standard Conv+BN behavior when parameters exist and
+documents the absence of recoverable BN parameters in the public ResNet.
 
 ## F2/F3: launch and buffer reduction (6 points)
 
@@ -39,7 +42,9 @@ launch_reduction = (raw_launches - optimized_launches) / raw_launches
 buffer_reduction = (raw_buffers - optimized_buffers) / raw_buffers
 ```
 
-Fusion should remove internal materialization only when the fused kernel consumes values directly. Do not merely rename multiple kernels as one while still launching or allocating each internal stage.
+The structural pass removes internal materialization only from the optimized
+graph. Launch reduction is counted through C3.2 decomposition rather than from
+fused node names alone.
 
 High-value opportunities in the released models include Gemm+bias, residual Add patterns, Transformer elementwise GELU chains, and residual Add+LayerNormalization. Softmax+Dropout may only appear in a training-style benchmark, because inference exports often omit or neutralize Dropout.
 
@@ -54,7 +59,8 @@ After every pass:
 5. Require optimized node count not to increase.
 6. Execute original and optimized graphs in FP32 and require `max_abs_diff <= 1e-3` against the same reference.
 
-Any numerical failure zeros all F4 points. For that reason, passes should be individually switchable and run transactionally: match, verify guards, rewrite, validate, then commit.
+Passes are individually switchable and run transactionally: match, verify
+guards, rewrite, validate, then commit or restore the snapshot.
 
 ## Safe pass order
 
@@ -68,7 +74,7 @@ Any numerical failure zeros all F4 points. For that reason, passes should be ind
 
 Run validation after each pass, not only at pipeline completion.
 
-## Acceptance evidence
+## Validation evidence
 
 - Per-pattern positive and negative tests.
 - Before/after node, launch, and buffer counts.

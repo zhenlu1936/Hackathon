@@ -6,18 +6,18 @@ Use `c35.standard_runner` for a closer implementation of the written C3.5 contra
 
 ```bash
 python3 -m c35.standard_runner \
-  --command 'python3 -m c35.deploy --onnx {onnx} --input {input} --output {output} --batch-size {batch_size} --backend cupy' \
+  --command 'python3 -m c35.deploy --onnx {onnx} --input {input} --output {output} --batch-size {batch_size}' \
   --batch-size 256 \
   --report c35-standard-report.json
 ```
 
-Or run:
+The release entrypoint is:
 
 ```bash
-./run_c35_standard.sh
+./run_c35.sh
 ```
 
-Set `PYTHON=.venv/bin/python` when the required packages are installed in the local virtual environment.
+Set `PYTHON` only when selecting a different server-native Python executable.
 
 Set `COMMAND_TEMPLATE` to the exact command registered for evaluation. The template must contain `{onnx}`, `{input}`, and `{output}`; it may contain `{batch_size}`.
 
@@ -29,22 +29,18 @@ The runner performs one cold subprocess execution per model and:
 - applies each model's `rtol` and `atol` from `thresholds.json`;
 - computes the requested top-1 accuracy and model-specific minimum;
 - measures process wall time from spawn through exit;
-- samples GPU memory for the root process and Linux `/proc` descendants using `pynvml`, with automatic `nvidia-smi` and process-local CuPy memory-pool fallbacks for MIG environments;
+- samples GPU memory for the root process and Linux `/proc` descendants using the server-native `nvidia-smi` command, with a process-local CuPy memory-pool fallback for MIG environments;
 - performs a CuPy import, CUDA-device, and matrix-multiply preflight;
 - emits a machine-readable JSON report;
 - returns nonzero if any correctness, accuracy, output-contract, command, timeout, or required GPU-evidence check fails.
 
-The normal mode requires GPU execution evidence from `pynvml`, `nvidia-smi`, or a structured record emitted by the child after real CuPy execution. The child record includes the device, CuPy version, and nonzero default-pool reservation; its pool total is a process-local high-water proxy when MIG suppresses per-process accounting, not an NVML-equivalent whole-process measurement. On a disclosed CPU development machine, add `--allow-reference`; the report records that waiver. GPU observation does not itself prove AEC execution.
+The normal mode requires AEC H200 execution evidence from `nvidia-smi` or a
+structured record emitted by the child after real CuPy
+execution. The child record includes the device, CuPy version, and nonzero
+default-pool reservation; its pool total is a process-local high-water proxy
+when MIG suppresses per-process accounting, not an NVML-equivalent whole-process
+measurement. There is no CPU/reference waiver in the CuPy-only runner.
 
 The report awards the known 15-point correctness/accuracy gate only when every model and the CuPy preflight pass. Runtime and peak-memory points remain `null` because the written rubric ranks submissions against one another; raw measurements are recorded for that ranking.
-
-For a disclosed CPU-only development check, make all exceptions explicit:
-
-```bash
-./run_c35_standard.sh \
-  --allow-reference \
-  --skip-cupy-preflight \
-  --command 'python3 -m c35.deploy --onnx {onnx} --input {input} --output {output} --batch-size {batch_size} --backend numpy'
-```
 
 The official evaluator implementation has not been released, so this runner follows the written specification but must not be described as byte-for-byte identical to the organizer's script.

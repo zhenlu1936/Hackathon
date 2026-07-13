@@ -18,6 +18,10 @@ env/
 
 # Generated / cached artifacts (must not enter submission)
 *.dag.json
+*-report.json
+c35-standard-report.json
+output/
+*.pyc
 output/
 *.plan.json
 c35-standard-report*.json

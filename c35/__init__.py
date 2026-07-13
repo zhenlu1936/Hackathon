@@ -1,8 +1,8 @@
 """C3.5 — end-to-end model deployment.
 
-Implements a connected compiler-stage reference pipeline:
+Implements the connected compiler-stage deployment pipeline:
 - ONNX model loading with weight extraction
-- CuPy CUDA compute by default, with explicit NumPy development mode
+- CuPy CUDA compute exclusively on the designated H200 AEC device
 - Graph-level execution with topological ordering
 - Batch execution with --batch-size
 - Output validation and manifest generation

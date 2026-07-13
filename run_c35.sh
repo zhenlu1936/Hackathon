@@ -6,7 +6,7 @@ cd "$(dirname "$0")"
 # registered submission command when testing another implementation.
 PYTHON="${PYTHON:-python3}"
 if [[ -z "${COMMAND_TEMPLATE:-}" ]]; then
-  COMMAND_TEMPLATE="$PYTHON -m c35.deploy --onnx {onnx} --input {input} --output {output} --batch-size {batch_size} --backend cupy"
+  COMMAND_TEMPLATE="$PYTHON -m c35.deploy --onnx {onnx} --input {input} --output {output} --batch-size {batch_size}"
 fi
 
 RELEASE=".specification/testcases/release_to_competitors"

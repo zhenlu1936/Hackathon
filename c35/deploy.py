@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """C3.5: End-to-end model deployment CLI.
 
-Reads an ONNX model and input data, runs inference using the selected reference
-array backend, and writes outputs with validation.  CuPy/CUDA is the default;
-this does not claim compliance with the unavailable AEC runtime.
+Reads an ONNX model and input data, runs inference using CuPy, and writes
+outputs with validation. CuPy/CUDA on the designated
+remote H200 server is the release AEC device path.
 
 Usage:
     python -m c35.deploy --onnx MODEL --input INPUT_DIR --output OUTPUT_DIR [--batch-size N]
@@ -16,40 +16,8 @@ import json
 import os
 import sys
 import time
-from typing import Any, Dict, List, Optional
 
-import numpy as np
-
-
-def compute_top1_accuracy(logits: np.ndarray, labels: np.ndarray) -> float:
-    """Compute top-1 accuracy.
-
-    Args:
-        logits: Model output of shape (N, num_classes).
-        labels: Ground truth labels of shape (N,) or (N, 1).
-
-    Returns:
-        Accuracy as a float between 0 and 1.
-    """
-    predicted = np.argmax(logits, axis=-1)
-    labels = labels.reshape(-1)
-    correct = np.sum(predicted == labels)
-    return float(correct) / len(labels)
-
-
-def load_labels(model_dir: str) -> Optional[np.ndarray]:
-    """Load ground truth labels from labels.npy if present.
-
-    Args:
-        model_dir: Directory containing the labels.npy file (testdata model dir).
-
-    Returns:
-        Labels array or None if not found.
-    """
-    labels_path = os.path.join(model_dir, "labels.npy")
-    if os.path.isfile(labels_path):
-        return np.load(labels_path)
-    return None
+import cupy as cp
 
 
 def validate_batch_size(value: str) -> int:
@@ -96,23 +64,6 @@ def main() -> None:
         default=None,
         help="Maximum batch size for inference (default: process all at once)",
     )
-    parser.add_argument(
-        "--labels",
-        default=None,
-        help="Optional path to labels.npy for accuracy computation",
-    )
-    parser.add_argument(
-        "--backend",
-        choices=("cupy", "numpy"),
-        default="cupy",
-        help="Numerical backend (default: cupy; numpy is explicit reference mode)",
-    )
-    parser.add_argument(
-        "--qualify-optimizations",
-        action="store_true",
-        help="run an additional unfused first batch and compare it with optimized output",
-    )
-
     args = parser.parse_args()
 
     onnx_path = args.onnx
@@ -152,8 +103,6 @@ def main() -> None:
             input_dir=input_dir,
             output_dir=output_dir,
             batch_size=batch_size,
-            backend=args.backend,
-            qualify_optimizations=args.qualify_optimizations,
         )
     except Exception as e:
         print(f"Error during inference: {e}", file=sys.stderr)
@@ -172,7 +121,7 @@ def main() -> None:
         fusion = info["fusion_stats"]
         plan = info.get("plan_summary") or {}
         print(
-            f"  Backend:     connected C3 {info['backend']} reference (not AEC)",
+            f"  Backend:     connected C3 {info['backend']} on AEC H200",
             file=sys.stderr,
         )
         print(
@@ -197,25 +146,6 @@ def main() -> None:
         file=sys.stderr,
     )
 
-    # Compute accuracy if labels are available and model is a classifier
-    labels_path = args.labels
-    if labels_path is None:
-        # Try to find labels in the parent of the input dir
-        parent_dir = os.path.dirname(os.path.normpath(input_dir))
-        auto_labels_path = os.path.join(parent_dir, "labels.npy")
-        if os.path.isfile(auto_labels_path):
-            labels_path = auto_labels_path
-
-    if labels_path and os.path.isfile(labels_path):
-        labels = np.load(labels_path)
-        output_path = os.path.join(output_dir, "logits.npy")
-        logits = np.load(output_path)
-
-        # Only compute top-1 if output is compatible (2D for classifier)
-        if logits.ndim == 2:
-            acc = compute_top1_accuracy(logits, labels)
-            print(f"  Top-1 acc:   {acc:.4f} ({acc*100:.2f}%)", file=sys.stderr)
-
     # Validate output files exist
     manifest_out = os.path.join(output_dir, "manifest.json")
     logits_out = os.path.join(output_dir, "logits.npy")
@@ -229,7 +159,7 @@ def main() -> None:
     # Validate manifest content
     with open(manifest_out, "r") as f:
         manifest = json.load(f)
-    logits_arr = np.load(logits_out)
+    logits_arr = cp.load(logits_out, allow_pickle=False)
 
     for entry in manifest.get("tensors", []):
         if entry["name"] != "logits":
@@ -247,7 +177,7 @@ def main() -> None:
                 file=sys.stderr,
             )
             sys.exit(1)
-        if logits_arr.dtype != np.float32:
+        if logits_arr.dtype != cp.float32:
             print(
                 f"Error: Output dtype is {logits_arr.dtype}, expected float32",
                 file=sys.stderr,

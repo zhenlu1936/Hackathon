@@ -785,6 +785,123 @@ def fuse_residual_norm(graph: Graph, fusion_log: List[Dict[str, Any]]) -> int:
     return fusions
 
 
+# ── Pattern F1f: FusedComputeActivation ─────────────────────────────
+
+# Compute op types whose output can be fused with an activation function.
+COMPUTE_OPS: Set[str] = {
+    "Gemm",
+    "MatMul",
+    "FusedMatMulBias",
+    "Conv",
+    "FusedConv2dBatchNorm",
+}
+
+# Activation op types eligible for compute fusion.
+ACTIVATION_OPS: Set[str] = {"Relu", "Erf"}
+
+
+def _is_compute_op(op_type: str) -> bool:
+    return op_type in COMPUTE_OPS
+
+
+def _is_activation_op(op_type: str) -> bool:
+    return op_type in ACTIVATION_OPS
+
+
+def fuse_compute_activation(graph: Graph, fusion_log: List[Dict[str, Any]]) -> int:
+    """Fuse compute -> activation into FusedComputeActivation.
+
+    Covers Gemm/MatMul/Conv (and their already-fused variants) followed by a
+    single activation node (Relu, Erf).
+
+    This is the single highest-impact fusion for the released models:
+      - MLP:      Gemm -> Relu            (2 instances)
+      - ResNet:   Conv -> Relu            (up to 17 instances)
+      - Transformer: FusedMatMulBias -> Erf  (4 instances)
+    """
+    fusions = 0
+    processed_nodes: Set[str] = set()
+
+    for node_id in list(graph.node_order):
+        if node_id in processed_nodes:
+            continue
+        node = graph.nodes.get(node_id)
+        if node is None or not _is_compute_op(node.op_type):
+            continue
+
+        compute_outputs = [o for o in node.outputs if o]
+        if len(compute_outputs) != 1:
+            continue
+        compute_out = compute_outputs[0]
+
+        if not _has_single_consumer(graph, compute_out):
+            continue
+
+        consumer_id = _get_consumers(graph, compute_out)[0]
+        consumer = graph.nodes.get(consumer_id)
+        if consumer is None or not _is_activation_op(consumer.op_type):
+            continue
+
+        # Activation output may be a graph output — still safe to fuse.
+        fused_id = _generate_fused_node_id(
+            "FusedComputeActivation", node.op_type, consumer.op_type, node_id
+        )
+
+        # Clear old activation output producer
+        for out_name in consumer.outputs:
+            if out_name:
+                graph.tensor_producer.pop(out_name, None)
+
+        attrs = dict(node.attributes)
+        attrs["_inner_op"] = node.op_type
+        attrs["_activation"] = consumer.op_type
+        attrs["_activation_attrs"] = dict(consumer.attributes)
+
+        fused_node = Node(
+            id=fused_id,
+            name=f"fused_compute_act_{node.op_type}_{consumer.op_type}_{node_id}",
+            op_type="FusedComputeActivation",
+            inputs=list(node.inputs),
+            outputs=list(consumer.outputs),
+            attributes=attrs,
+        )
+        graph.add_node(fused_node)
+
+        for out_name in fused_node.outputs:
+            if out_name:
+                if out_name not in graph.tensors:
+                    graph.register_tensor(name=out_name)
+                graph.set_producer(out_name, fused_id)
+
+        # Reroute consumers of the activation's output
+        act_outputs = [o for o in consumer.outputs if o]
+        if act_outputs:
+            graph.reroute_consumers(act_outputs[0], fused_node.outputs[0])
+            for out_tensor in graph.outputs:
+                if out_tensor.name == act_outputs[0]:
+                    out_tensor.name = fused_node.outputs[0]
+
+        removed_tensors = list(node.outputs) + list(consumer.outputs)
+        removed_tensors = [t for t in removed_tensors if t and t in graph.tensors]
+
+        graph.remove_node(consumer_id)
+        graph.remove_node(node_id)
+        processed_nodes.add(node_id)
+        processed_nodes.add(consumer_id)
+
+        fusions += 1
+        fusion_log.append({
+            "pattern": "FusedComputeActivation",
+            "status": "fused",
+            "old_node_ids": [node_id, consumer_id],
+            "new_node_id": fused_id,
+            "removed_tensors": removed_tensors,
+            "rejection_reason": "",
+        })
+
+    return fusions
+
+
 # ── Dead tensor cleanup ──────────────────────────────────────────────
 
 

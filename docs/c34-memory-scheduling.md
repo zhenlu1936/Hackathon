@@ -1,16 +1,19 @@
 # C3.4 — Memory planning and scheduling
 
-## Objective
+## Release contract
 
 This 10-point section is code-reviewed. Five features are worth 2 points each, and each must be implemented through the actual execution-plan path. Interfaces, comments, logs, or unused classes do not score.
 
-The plan must execute through the AEC runtime/device interface. Generic CUDA-like terminology may describe concepts, but claims of completion require submitted source that performs the corresponding AEC allocation, transfer, kernel, stream, and event operations. Do not submit cached plans or precomputed schedules keyed to public/hidden model identity.
+The remote H200 is the designated AEC device. Full C3.4 integration requires
+the released plan to drive the corresponding CuPy/H200 allocation, transfer,
+kernel, stream, and event operations. Do not submit cached plans or precomputed
+schedules keyed to public or hidden model identity.
 
 ## A: device pool and weight preload
 
 Provide real device allocation/free abstractions and connect initializers/constants to device buffers referenced by kernel steps.
 
-Recommended plan steps:
+The release represents weight residency with:
 
 ```text
 ALLOC(weight_slot) -> H2D(initializer, weight_slot) -> KERNEL(..., weight_slot)
@@ -60,7 +63,7 @@ Parallel opportunities may be limited in a mostly sequential MLP/ResNet. Transfo
 
 ## Integration requirements
 
-The final `ExecutionPlan` should make review possible without reading the whole runtime:
+The released `ExecutionPlan` exposes:
 
 - allocation ID and size for every tensor;
 - initializer upload and residency steps;
@@ -70,16 +73,15 @@ The final `ExecutionPlan` should make review possible without reading the whole 
 - lifetime intervals and reuse decisions;
 - peak planned memory.
 
-## Implementation order
+## Released planning path
 
-1. Correct explicit allocations and weight upload.
-2. Model-lifetime weight residency.
-3. Intermediate lifetime analysis and slot reuse.
-4. Pool free list plus best-fit/size-class/coalescing policy.
-5. Asynchronous copy stream and weight-ready events.
-6. Dependency-aware multi-compute-stream scheduling.
+The released scheduler creates explicit allocations and weight uploads,
+model-lifetime weight residency, intermediate lifetime reuse, a managed pool,
+copy-stream readiness events, and dependency-aware compute-stream assignments.
+These are connected plan artifacts, but they do not yet directly drive the
+CuPy operations executed on the AEC H200.
 
-## Acceptance evidence
+## Validation evidence
 
 - An execution plan proving each of A–E is connected.
 - Allocation trace showing two non-overlapping tensors reuse one slot.

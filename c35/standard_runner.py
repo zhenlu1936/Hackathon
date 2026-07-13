@@ -5,17 +5,16 @@ This is deliberately separate from ``c35.test_c35``.  It invokes only the
 registered command-line interface, reads the released manifests and thresholds,
 measures cold wall time, validates outputs against golden tensors, computes the
 specified accuracy gate, and samples GPU memory for the process tree through
-``pynvml`` or an ``nvidia-smi`` fallback.
+the server-native ``nvidia-smi`` command.
 
 Example:
 
     python -m c35.standard_runner \
-      --command 'python -m c35.deploy --onnx {onnx} --input {input} --output {output} --batch-size {batch_size} --backend cupy' \
+      --command 'python -m c35.deploy --onnx {onnx} --input {input} --output {output} --batch-size {batch_size}' \
       --batch-size 256 --report c35-standard-report.json
 
-By default the runner enforces target execution evidence: GPU process memory
-must be observable and at least one process in the command tree must use it. Use
-``--allow-reference`` only for disclosed CPU/reference validation.
+The runner enforces CuPy target execution evidence: GPU process memory or a
+valid child CuPy-pool record must be observable.
 """
 
 from __future__ import annotations
@@ -33,9 +32,9 @@ import sys
 import tempfile
 import threading
 import time
-from typing import Any, Dict, Iterable, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
-import numpy as np
+import cupy as cp
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,7 +46,7 @@ GPU_EVIDENCE_PREFIX = "C35_GPU_EVIDENCE_JSON="
 DEFAULT_COMMAND = (
     f"{shlex.quote(sys.executable)} -m c35.deploy "
     "--onnx {onnx} --input {input} --output {output} "
-    "--batch-size {batch_size} --backend cupy"
+    "--batch-size {batch_size}"
 )
 
 
@@ -60,7 +59,7 @@ class ModelResult:
     wall_time_s: Optional[float] = None
     peak_gpu_memory_bytes: Optional[int] = None
     gpu_process_observed: bool = False
-    nvml_status: str = "not_started"
+    memory_sampler_status: str = "not_started"
     gpu_evidence_source: Optional[str] = None
     backend_evidence: Dict[str, Any] = field(default_factory=dict)
     precision_pass: bool = False
@@ -82,8 +81,6 @@ def _cupy_preflight() -> Dict[str, Any]:
     """Exercise the CuPy installation and visible CUDA device."""
     result: Dict[str, Any] = {"passed": False}
     try:
-        import cupy as cp
-
         if cp.__version__ != EXPECTED_CUPY_VERSION:
             raise RuntimeError(
                 f"cupy {cp.__version__} does not match target {EXPECTED_CUPY_VERSION}"
@@ -205,7 +202,7 @@ def _descendants(root_pid: int) -> Set[int]:
     return result
 
 
-class NvmlProcessTreeSampler:
+class NvidiaSmiProcessTreeSampler:
     def __init__(self, root_pid: int, interval_s: float) -> None:
         self.root_pid = root_pid
         self.interval_s = interval_s
@@ -214,146 +211,95 @@ class NvmlProcessTreeSampler:
         self.status = "unavailable"
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        self._pynvml: Any = None
-        self._handles: List[Any] = []
         self._mode = "none"
 
     def start(self) -> None:
-        try:
-            import pynvml  # type: ignore
-
-            pynvml.nvmlInit()
-            self._pynvml = pynvml
-            self._handles = [
-                pynvml.nvmlDeviceGetHandleByIndex(index)
-                for index in range(pynvml.nvmlDeviceGetCount())
-            ]
-            self._mode = "pynvml"
-            self.status = "sampling"
-        except Exception as exc:
-            if shutil.which("nvidia-smi") is None:
-                self.status = f"unavailable: {exc}; nvidia-smi not found"
-                return
-            self._mode = "nvidia-smi"
-            self.interval_s = max(self.interval_s, 0.1)
-            self.status = "sampling:nvidia-smi"
+        if shutil.which("nvidia-smi") is None:
+            self.status = "unavailable: nvidia-smi not found"
+            return
+        self._mode = "nvidia-smi"
+        self.interval_s = max(self.interval_s, 0.1)
+        self.status = "sampling:nvidia-smi"
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
-    def _device_processes(self, handle: Any) -> Iterable[Any]:
-        for method_name in (
-            "nvmlDeviceGetComputeRunningProcesses_v3",
-            "nvmlDeviceGetComputeRunningProcesses_v2",
-            "nvmlDeviceGetComputeRunningProcesses",
-            "nvmlDeviceGetGraphicsRunningProcesses_v3",
-            "nvmlDeviceGetGraphicsRunningProcesses_v2",
-            "nvmlDeviceGetGraphicsRunningProcesses",
-        ):
-            method = getattr(self._pynvml, method_name, None)
-            if method is None:
-                continue
-            try:
-                yield from method(handle)
-            except Exception:
-                continue
-
     def _sample(self) -> None:
         pids = _descendants(self.root_pid)
-        if self._mode == "nvidia-smi":
-            total_mib = 0
-            observed = False
-            # On MIG setups the global query may miss processes; enumerate
-            # individual GPU / MIG compute-instance indexes and query each one.
+        total_mib = 0
+        observed = False
+        # On MIG setups the global query may miss processes; enumerate
+        # individual GPU / MIG compute-instance indexes and query each one.
+        try:
+            gpu_list = subprocess.run(
+                ["nvidia-smi", "--query-gpu=index", "--format=csv,noheader"],
+                capture_output=True,
+                text=True,
+                timeout=max(1.0, self.interval_s * 5),
+                check=False,
+            )
+            gpu_indexes = [
+                int(line.strip()) for line in gpu_list.stdout.splitlines()
+                if line.strip().isdigit()
+            ]
+        except (OSError, ValueError, subprocess.SubprocessError):
+            gpu_indexes = []
+        queries: List[List[str]] = [
+            ["nvidia-smi", "--query-compute-apps=pid,used_gpu_memory",
+             "--format=csv,noheader,nounits"],
+        ]
+        for idx in gpu_indexes:
+            queries.append([
+                "nvidia-smi", "-i", str(idx),
+                "--query-compute-apps=pid,used_gpu_memory",
+                "--format=csv,noheader,nounits",
+            ])
+        queries.append([
+            "nvidia-smi", "--query-accounted-apps=pid,used_gpu_memory",
+            "--format=csv,noheader,nounits",
+        ])
+        for query_cmd in queries:
             try:
-                gpu_list = subprocess.run(
-                    ["nvidia-smi", "--query-gpu=index", "--format=csv,noheader"],
+                completed = subprocess.run(
+                    query_cmd,
                     capture_output=True,
                     text=True,
                     timeout=max(1.0, self.interval_s * 5),
                     check=False,
                 )
-                gpu_indexes = [
-                    int(line.strip()) for line in gpu_list.stdout.splitlines()
-                    if line.strip().isdigit()
-                ]
-            except (OSError, ValueError, subprocess.SubprocessError):
-                gpu_indexes = []
-            # Build a list of queries to try: global, per-GPU, MIG-aware.
-            queries: List[List[str]] = [
-                ["nvidia-smi", "--query-compute-apps=pid,used_gpu_memory",
-                 "--format=csv,noheader,nounits"],
-            ]
-            for idx in gpu_indexes:
-                queries.append([
-                    "nvidia-smi", "-i", str(idx),
-                    "--query-compute-apps=pid,used_gpu_memory",
-                    "--format=csv,noheader,nounits",
-                ])
-            # MIG-aware fallback: use --query-accounted-apps which may report
-            # processes that --query-compute-apps misses on MIG slices.
-            queries.append([
-                "nvidia-smi", "--query-accounted-apps=pid,used_gpu_memory",
-                "--format=csv,noheader,nounits",
-            ])
-            for query_cmd in queries:
-                try:
-                    completed = subprocess.run(
-                        query_cmd,
-                        capture_output=True,
-                        text=True,
-                        timeout=max(1.0, self.interval_s * 5),
-                        check=False,
-                    )
-                    for line in completed.stdout.splitlines():
-                        fields = [field.strip() for field in line.split(",")]
-                        if len(fields) != 2:
-                            continue
-                        try:
-                            pid, used_mib = int(fields[0]), int(fields[1])
-                        except ValueError:
-                            continue
-                        if pid in pids:
-                            total_mib += used_mib
-                            observed = True
-                except (OSError, ValueError, subprocess.SubprocessError):
-                    pass
-            # Fallback: if PID-based tracking found nothing but the GPU is
-            # clearly active (non-zero total memory), record the total used
-            # memory as a lower-confidence signal.
-            if not observed:
-                try:
-                    mem = subprocess.run(
-                        ["nvidia-smi", "--query-gpu=memory.used",
-                         "--format=csv,noheader,nounits"],
-                        capture_output=True,
-                        text=True,
-                        timeout=max(1.0, self.interval_s * 5),
-                        check=False,
-                    )
-                    for line in mem.stdout.splitlines():
-                        line = line.strip()
-                        if line.isdigit():
-                            total_mib = max(total_mib, int(line))
-                except (OSError, ValueError, subprocess.SubprocessError):
-                    pass
-            self.process_observed = self.process_observed or observed
-            self.peak_bytes = max(self.peak_bytes, total_mib * 1024 * 1024)
-            return
-        total = 0
-        observed = False
-        for handle in self._handles:
-            per_pid: Dict[int, int] = {}
-            for process in self._device_processes(handle):
-                pid = int(process.pid)
-                if pid not in pids:
-                    continue
-                used = getattr(process, "usedGpuMemory", 0)
-                if isinstance(used, int) and used > 0:
-                    per_pid[pid] = max(per_pid.get(pid, 0), used)
+                for line in completed.stdout.splitlines():
+                    fields = [field.strip() for field in line.split(",")]
+                    if len(fields) != 2:
+                        continue
+                    try:
+                        pid, used_mib = int(fields[0]), int(fields[1])
+                    except ValueError:
+                        continue
+                    if pid not in pids:
+                        continue
+                    total_mib += used_mib
                     observed = True
-            total += sum(per_pid.values())
+            except (OSError, ValueError, subprocess.SubprocessError):
+                pass
+        # This whole-device value is a lower-confidence diagnostic only. It is
+        # not treated as process evidence when MIG hides PID accounting.
+        if not observed:
+            try:
+                mem = subprocess.run(
+                    ["nvidia-smi", "--query-gpu=memory.used",
+                     "--format=csv,noheader,nounits"],
+                    capture_output=True,
+                    text=True,
+                    timeout=max(1.0, self.interval_s * 5),
+                    check=False,
+                )
+                for line in mem.stdout.splitlines():
+                    line = line.strip()
+                    if line.isdigit():
+                        total_mib = max(total_mib, int(line))
+            except (OSError, ValueError, subprocess.SubprocessError):
+                pass
         self.process_observed = self.process_observed or observed
-        self.peak_bytes = max(self.peak_bytes, total)
+        self.peak_bytes = max(self.peak_bytes, total_mib * 1024 * 1024)
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -367,12 +313,7 @@ class NvmlProcessTreeSampler:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=max(1.0, self.interval_s * 4))
-        if self._pynvml is not None:
-            try:
-                self._pynvml.nvmlShutdown()
-            except Exception:
-                pass
-        self.status = "ok" if self._mode == "pynvml" else "ok:nvidia-smi"
+        self.status = "ok:nvidia-smi"
 
 
 def _format_command(template: str, model: Path, input_dir: Path,
@@ -414,22 +355,22 @@ def _validate_outputs(model_dir: Path, output_dir: Path,
     result.atol = float(precision["atol"])
     allclose = True
     max_diff = 0.0
-    arrays: Dict[str, np.ndarray] = {}
+    arrays: Dict[str, cp.ndarray] = {}
     for name, golden_entry in golden_entries.items():
         output_entry = output_entries[name]
         output_path = _safe_tensor_path(output_dir, output_entry["file"])
         golden_path = _safe_tensor_path(golden_dir, golden_entry["file"])
         if not output_path.is_file():
             raise FileNotFoundError(f"Missing output tensor file: {output_path}")
-        actual = np.load(output_path, allow_pickle=False)
-        expected = np.load(golden_path, allow_pickle=False)
+        actual = cp.load(output_path, allow_pickle=False)
+        expected = cp.load(golden_path, allow_pickle=False)
         arrays[name] = actual
-        declared_dtype = np.dtype(output_entry["dtype"])
+        declared_dtype = cp.dtype(output_entry["dtype"])
         if actual.dtype != declared_dtype:
             raise ValueError(
                 f"Output '{name}' dtype mismatch: manifest={declared_dtype}, npy={actual.dtype}"
             )
-        if actual.dtype != np.float32:
+        if actual.dtype != cp.float32:
             raise ValueError(f"Output '{name}' must be float32, got {actual.dtype}")
         if list(actual.shape) != list(output_entry["shape"]):
             raise ValueError(
@@ -441,9 +382,11 @@ def _validate_outputs(model_dir: Path, output_dir: Path,
                 f"Output '{name}' shape {actual.shape} != golden {expected.shape}"
             )
         if actual.size:
-            max_diff = max(max_diff, float(np.max(np.abs(actual - expected))))
+            max_diff = max(
+                max_diff, float(cp.max(cp.abs(actual - expected)).item())
+            )
         allclose = allclose and bool(
-            np.allclose(actual, expected, rtol=result.rtol, atol=result.atol)
+            cp.allclose(actual, expected, rtol=result.rtol, atol=result.atol).item()
         )
 
     result.max_abs_diff = max_diff
@@ -456,20 +399,22 @@ def _validate_outputs(model_dir: Path, output_dir: Path,
     else:
         if accuracy_spec.get("metric") != "top1":
             raise ValueError(f"Unsupported accuracy metric: {accuracy_spec}")
-        labels = np.load(model_dir / "labels.npy", allow_pickle=False).reshape(-1)
+        labels = cp.load(model_dir / "labels.npy", allow_pickle=False).reshape(-1)
         logits = arrays["logits"]
         if logits.shape[0] != labels.shape[0]:
             raise ValueError(
                 f"Logit/label count mismatch: {logits.shape[0]} != {labels.shape[0]}"
             )
-        result.accuracy = float(np.mean(np.argmax(logits, axis=-1) == labels))
+        result.accuracy = float(
+            cp.mean(cp.argmax(logits, axis=-1) == labels).item()
+        )
         result.accuracy_min = float(accuracy_spec["min"])
         result.accuracy_pass = result.accuracy >= result.accuracy_min
 
 
 def run_model(model_name: str, command_template: str, models_dir: Path,
               testdata_dir: Path, batch_size: int, timeout_s: float,
-              sample_interval_s: float, allow_reference: bool) -> ModelResult:
+              sample_interval_s: float) -> ModelResult:
     result = ModelResult(model=model_name)
     model_path = models_dir / f"{model_name}_v1.onnx"
     model_dir = testdata_dir / f"{model_name}_v1"
@@ -494,7 +439,7 @@ def run_model(model_name: str, command_template: str, models_dir: Path,
                     stderr=stderr_file,
                     start_new_session=True,
                 )
-                sampler = NvmlProcessTreeSampler(process.pid, sample_interval_s)
+                sampler = NvidiaSmiProcessTreeSampler(process.pid, sample_interval_s)
                 sampler.start()
                 try:
                     result.returncode = process.wait(timeout=timeout_s)
@@ -513,7 +458,7 @@ def run_model(model_name: str, command_template: str, models_dir: Path,
                 result.stderr_tail = _tail(stderr_text)
                 result.backend_evidence = _parse_backend_evidence(stderr_text)
                 result.gpu_process_observed = sampler.process_observed
-                result.nvml_status = sampler.status
+                result.memory_sampler_status = sampler.status
 
                 sampled = (
                     sampler.status.startswith("ok")
@@ -534,14 +479,10 @@ def run_model(model_name: str, command_template: str, models_dir: Path,
             if result.returncode != 0:
                 raise RuntimeError(f"Command exited with status {result.returncode}")
             _validate_outputs(model_dir, output_dir, result)
-            result.gpu_evidence_pass = (
-                allow_reference
-                or result.gpu_evidence_source is not None
-            )
+            result.gpu_evidence_pass = result.gpu_evidence_source is not None
             if not result.gpu_evidence_pass:
                 result.errors.append(
-                    "No target GPU execution evidence was observed; "
-                    "use --allow-reference only for disclosed local reference runs"
+                    "No target CuPy GPU execution evidence was observed"
                 )
             accuracy_ok = result.accuracy_pass is not False
             result.passed = (
@@ -568,7 +509,7 @@ def _print_result(result: ModelResult) -> None:
     )
     print(f"[{status}] {result.model}")
     print(f"  wall time:       {result.wall_time_s:.6f}s" if result.wall_time_s else "  wall time:       n/a")
-    source = result.gpu_evidence_source or result.nvml_status
+    source = result.gpu_evidence_source or result.memory_sampler_status
     print(f"  peak GPU memory: {memory} ({source})")
     print(f"  max abs diff:    {result.max_abs_diff}")
     print(f"  accuracy:        {accuracy}")
@@ -597,32 +538,15 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=1800.0)
     parser.add_argument("--sample-interval", type=float, default=0.01)
     parser.add_argument("--report", type=Path, default=None)
-    parser.add_argument(
-        "--allow-reference",
-        action="store_true",
-        help="waive GPU-process evidence for disclosed CPU reference validation",
-    )
-    parser.add_argument(
-        "--skip-cupy-preflight",
-        action="store_true",
-        help="skip CuPy/device smoke test for a custom non-CuPy command",
-    )
     args = parser.parse_args()
     if args.batch_size <= 0:
         parser.error("--batch-size must be positive")
     if args.timeout <= 0 or args.sample_interval <= 0:
         parser.error("--timeout and --sample-interval must be positive")
 
-    preflight = (
-        {"passed": True, "skipped": True}
-        if args.skip_cupy_preflight else _cupy_preflight()
-    )
+    preflight = _cupy_preflight()
     if preflight["passed"]:
-        label = (
-            "skipped"
-            if preflight.get("skipped")
-            else f"{preflight['cupy_version']} on {preflight['device_name']}"
-        )
+        label = f"{preflight['cupy_version']} on {preflight['device_name']}"
         print(f"CuPy preflight: {label}")
     else:
         print(f"CuPy preflight failed: {preflight.get('error', 'unknown error')}")
@@ -631,24 +555,18 @@ def main() -> int:
         run_model(
             model, args.command, args.models_dir, args.testdata_dir,
             args.batch_size, args.timeout, args.sample_interval,
-            args.allow_reference,
         )
         for model in args.models
     ]
     for result in results:
         _print_result(result)
     all_models_passed = all(result.passed for result in results)
-    score_eligible = (
-        not args.allow_reference
-        and preflight["passed"]
-        and not preflight.get("skipped", False)
-    )
+    score_eligible = preflight["passed"]
     gate_points = 15 if score_eligible and all_models_passed else 0
     report = {
         "format_version": "1.0",
         "command_template": args.command,
         "batch_size": args.batch_size,
-        "allow_reference": args.allow_reference,
         "cupy_preflight": preflight,
         "written_scoring": {
             "correctness_accuracy_points": 15,
@@ -660,7 +578,7 @@ def main() -> int:
                 "earned": gate_points if score_eligible else None,
                 "available": 15,
                 "eligible": score_eligible,
-                "reason": None if score_eligible else "reference-mode waiver is not score evidence",
+                "reason": None if score_eligible else "CuPy preflight failed",
             },
             "runtime": {
                 "earned": None,
