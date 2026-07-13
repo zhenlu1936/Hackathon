@@ -23,7 +23,7 @@ exercises the same artifact and backend evaluated by the organizer.
 | 7 | P1 | C3.4 runtime | Persistent streams/events and direct planned writes for generated fused kernels are source-connected, but other high-level operators retain temporaries and the revision has not run on H200 | Complete-chain and actual-peak claims remain unproven |
 | 8 | P1 | C3.4 concurrency | Reuse dependencies, persistent physical streams, reusable plan events, and a unified timeline are implemented, but target ordering/overlap has not been traced | Reuse safety and prefetch overlap remain target-unproven |
 | 9 | P1 | C3.5 integration | CuPy executes on the AEC H200 but evaluates high-level nodes instead of C3.2 kernel steps | End-to-end device execution works; compiler-plan integration remains incomplete |
-| 10 | P0 | Submission | Direct `google.protobuf` native-server verification and archive cleanliness are not proven | Dependency/reproducibility portions of Integrity Rule 6 remain release blockers; source and AI disclosures are current |
+| 10 | P0 | Submission | Direct `google.protobuf` native-server verification is not proven | Dependency verification under Integrity Rule 6 remains a release blocker; the staged archive is clean and source/AI disclosures are current |
 | 12 | P2 | Evaluator API | Referenced C3.2/C3.3 benchmark is absent | Hidden API compatibility is unknown |
 
 ## H200 execution integration
@@ -73,15 +73,16 @@ The C3.2 smoke script now prints `14.17/15`: D1 is 3.0/3.0 with fp32/fp16/fp8/fp
 ## C3.3 reduction and backend correctness
 
 Current local evidence: Python compilation and diff checks pass, C3.2 remains
-`14.17/15`, `python3 -m c33.test_c33` passes `68/68` with a written-rubric
+`14.17/15`, `python3 -m c33.test_c33` passes `61/61` with a written-rubric
 structural total of `15.00/15.0`, and the focused executable-fusion suite passes
 `8/8`. The current same-lowering counts are MLP `9 -> 3` launches and `8 -> 2`
 buffers, ResNet-18 `75 -> 28` and `74 -> 27`, and Transformer `217 -> 79` and
 `224 -> 86`. Corresponding reductions are `66.7%/75.0%`, `62.7%/63.5%`, and
 `63.6%/61.6%`.
 
-The implementation uses generated single-launch kernels and does not re-enable
-the sequential bounded-region utility. Buffer counting now includes named
+The implementation uses generated single-launch kernels. The obsolete
+sequential region and compute-activation utilities have been removed. Buffer
+counting now includes named
 C3.2 lowering intermediates, and Constant metadata references count as zero
 launches because the runtime preloads them. Optimized graphs build complete
 C3.4 plans locally. CuPy is unavailable on this machine, so the expanded device
@@ -95,9 +96,8 @@ self-score convention rather than a claim about the unreleased evaluator.
 The earlier MLP `88.9%/100.0%`, ResNet-18 `84.0%/76.6%`, and Transformer
 `74.3%/73.5%` launch/logical-buffer figures are historical and no longer
 current release evidence. They counted `FusedExecutionRegion` as one launch
-while its executor ran the retained operations sequentially. The default
-pipeline no longer enables that pass or the sequential compute-activation
-rewrite.
+while its executor ran the retained operations sequentially. Those deprecated
+paths and their test-only ABI are no longer present.
 
 Current implementation state:
 
@@ -117,8 +117,6 @@ Current implementation state:
 - explicit Conv+BN parameters are folded in the executor's CuPy initializer
   store before C3.4 planning, including the planned executor's device-copy
   path; the public ResNet still has no recoverable BN.
-- the general region utility remains available for ABI testing but is not part
-  of `GraphPassPipeline` without a single-kernel lowering.
 
 Run the expanded device numerical tests and all three released graphs on H200,
 then compare unfused and fused executions with a launch profiler and confirm
@@ -208,10 +206,11 @@ Before submission, provide:
 42. Complete exact versions, licenses, purposes, and call boundaries for all
     used modules. The server-native `nvidia-smi` boundary is now recorded; do
     not infer an exact CuPy distribution name from the importable module alone.
-45. Build the actual submission archive and inspect its file list for virtual
-    environments, caches, bytecode, reports, generated plans/outputs,
-    `.agents`, `.specification`, and development-only assets. `.gitignore` is
-    packaging policy, not evidence that the archive is clean.
+
+Archive gate #45 uses non-destructive packaging: tracked reports remain in the
+repository and `.gitattributes` excludes their directories from `git archive`.
+Rebuild from the final staged tree and final commit before submission so later
+changes cannot bypass that evidence.
 
 The local macOS ARM environment is not evidence of parity with the specified Linux x86_64/CUDA environment.
 
@@ -226,7 +225,7 @@ The local macOS ARM environment is not evidence of parity with the specified Lin
   source correction is locally checked, but the earlier three-model H200 pass
   is historical until report 3 is superseded by a rerun. This is not direct
   C3.2 kernel-step execution evidence.
-- C3.3 current local evidence: the self-test passes `68/68` and reports
+- C3.3 current local evidence: the self-test passes `61/61` and reports
   `15.00/15.0` structurally; the focused executable-fusion suite passes `8/8`,
   and all released-model launch/buffer reductions exceed 60%. The historical
   bounded-region H200 figures remain superseded. The generated kernels and

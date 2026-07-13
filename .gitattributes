@@ -1,0 +1,5 @@
+# Preserve validation evidence in the repository while excluding generated
+# reports from the competition submission archive.
+docs/c35_reports/ export-ignore
+docs/c3_reports/ export-ignore
+.agents/ export-ignore

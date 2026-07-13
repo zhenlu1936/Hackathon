@@ -685,7 +685,10 @@ OP_DISPATCH: Dict[str, Any] = {
     "Reshape": op_reshape,
     "Softmax": op_softmax,
     "Split": op_split,
+    "Sqrt": op_sqrt,
+    "Sub": op_sub,
     "Transpose": op_transpose,
+    "Exp": op_exp,
 }
 
 
@@ -1512,96 +1515,6 @@ def op_fused_transpose_reshape(
     return out
 
 
-def op_fused_compute_activation(inputs: List[xp.ndarray],
-                                attrs: Dict[str, Any]) -> xp.ndarray:
-    """FusedComputeActivation: compute op followed by activation (Relu/Erf).
-
-    ``attrs['_inner_op']`` is the original compute op type.
-    ``attrs['_activation']`` is the activation function to apply.
-    All other attributes (including compute op attributes) are forwarded.
-    """
-    inner_op = attrs.get("_inner_op", "")
-    activation = attrs.get("_activation", "")
-
-    impl = OP_DISPATCH.get(inner_op)
-    if impl is None:
-        raise ValueError(f"Unknown inner compute op in FusedComputeActivation: {inner_op}")
-    result = impl(inputs, attrs)
-
-    act_impl = OP_DISPATCH.get(activation)
-    if act_impl is None:
-        raise ValueError(f"Unknown activation in FusedComputeActivation: {activation}")
-    # Pass activation-specific attributes from the original node
-    act_attrs = dict(attrs.get("_activation_attrs", {}))
-    # For Relu there are no attributes beside the input
-    return act_impl([result], act_attrs)
-
-
-def op_fused_execution_region(inputs: List[xp.ndarray],
-                              attrs: Dict[str, Any]) -> Any:
-    """Execute the exact operator program retained by a C3.3 region rewrite.
-
-    This is the correctness/reference lowering.  It intentionally does not
-    claim that the contained operations are one physical GPU kernel; that
-    requires a separate hardware-specific code-generation step.
-    """
-    program = attrs.get("_region_ops", [])
-    if not program:
-        raise ValueError("FusedExecutionRegion has no operator program")
-
-    values: Dict[str, Any] = {}
-    result: Any = None
-    for entry in program:
-        op_inputs: List[Any] = []
-        for ref in entry.get("inputs", []):
-            if ref is None:
-                op_inputs.append(None)
-            elif isinstance(ref, int):
-                if ref < 0 or ref >= len(inputs):
-                    raise ValueError(
-                        f"FusedExecutionRegion input index {ref} is out of range"
-                    )
-                op_inputs.append(inputs[ref])
-            elif isinstance(ref, str) and ref in values:
-                op_inputs.append(values[ref])
-            else:
-                raise ValueError(
-                    f"FusedExecutionRegion cannot resolve value {ref!r}"
-                )
-
-        op_type = entry.get("op", "")
-        impl = OP_DISPATCH.get(op_type)
-        if impl is None or op_type == "FusedExecutionRegion":
-            raise ValueError(
-                f"Unsupported operation in FusedExecutionRegion: {op_type}"
-            )
-        result = impl(op_inputs, entry.get("attrs", {}))
-        output_names = entry.get("outputs", [])
-        result_values = result if isinstance(result, (list, tuple)) else [result]
-        if len(result_values) != len(output_names):
-            raise ValueError(
-                f"{op_type} produced {len(result_values)} values for "
-                f"{len(output_names)} region outputs"
-            )
-        for output_name, output_value in zip(output_names, result_values):
-            values[output_name] = output_value
-
-    return result
-
-
-# Copy of dispatch for FusedEWChain internal use (avoid circular import)
-_OP_DISPATCH = {
-    "Add": op_add,
-    "Sub": op_sub,
-    "Mul": op_mul,
-    "Div": op_div,
-    "Relu": op_relu,
-    "Erf": op_erf,
-    "Exp": op_exp,
-    "Sqrt": op_sqrt,
-}
-
-
 def execute_op(op_type: str, inputs: List[xp.ndarray],
                attrs: Dict[str, Any]) -> Any:
     """Execute an ONNX operator.
@@ -1633,7 +1546,5 @@ _FUSED_DISPATCH = {
     "FusedSoftmaxDropout": op_fused_softmax_dropout,
     "FusedResidualNorm": op_fused_residual_norm,
     "FusedTransposeReshape": op_fused_transpose_reshape,
-    "FusedComputeActivation": op_fused_compute_activation,
-    "FusedExecutionRegion": op_fused_execution_region,
 }
 OP_DISPATCH.update(_FUSED_DISPATCH)

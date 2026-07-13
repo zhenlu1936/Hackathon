@@ -25,9 +25,9 @@ from c32.kernel_spec import KernelSpecRef
 from c32.strategy import Strategy, ExecutionMode
 from c34.execution_plan import (
     Allocation, Transfer, KernelStep, EventDep,
-    LifetimeInterval, ExecutionPlan, PoolStats, TimelineStep,
+    LifetimeInterval, ExecutionPlan, TimelineStep,
 )
-from c34.lifetime import compute_lifetimes, find_overlap_groups
+from c34.lifetime import compute_lifetimes
 from c34.memory_pool import DeviceMemoryPool, FitPolicy
 
 

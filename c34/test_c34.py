@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from typing import Any, Dict, List
+from typing import Dict
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -18,8 +18,6 @@ from c31.import_onnx import import_onnx
 from c3common.ir.graph import Graph
 from c34.scheduler import ExecutionScheduler
 from c34.memory_pool import DeviceMemoryPool, FitPolicy
-from c34.lifetime import compute_lifetimes, find_overlap_groups
-from c34.execution_plan import ExecutionPlan, LifetimeInterval
 
 MODELS_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),

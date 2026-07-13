@@ -82,8 +82,8 @@ attention scores, single-output LayerNormalization, elementwise chains,
 residual normalization, Softmax+Dropout, and Transpose+Reshape. Each writes
 directly into its C3.4 planned output view. Explicit Conv+BN graphs fold
 parameters from the CuPy initializer store before C3.4 planning.
-`FusedComputeActivation` and `FusedExecutionRegion` remain available utilities
-but are disabled because their reference executors are sequential.
+The obsolete sequential `FusedComputeActivation` and `FusedExecutionRegion`
+matchers, runtimes, dispatch entries, and test-only ABI have been removed.
 
 The current local same-lowering results are MLP `66.7%/75.0%`, ResNet-18
 `62.7%/63.5%`, and Transformer `63.6%/61.6%` launch/logical-buffer reduction.
@@ -169,7 +169,7 @@ gate and [remaining problems](remaining-problems.md) for unclosed items.
 | 2 | Corrected and ran the FULL_FP32 golden-output gate on H200 | All three released models passed `allclose` and `top1_match=1.0`; direct decomposed-kernel execution remains #1/#36 |
 | 6 | Reran the revised CuPy-only optimized graph on all three full released datasets | Current released-graph C3.3/C3.5 numerical gates pass; physical fused-kernel lowering remains #27 |
 | 11, 29, 35 | Capped C3.3 and C3.4 self-scores to their maximums | C3.3: `8.60/8.6`, C3.4: `10.00/10.0` |
-| 28 | Added `FusedComputeActivation` plus bounded, topology-driven `FusedExecutionRegion` formation | The region ABI remains useful for tests, but both sequential reference implementations are disabled in the default pipeline and do not establish F2/F3 reduction |
+| 28 | Added `FusedComputeActivation` plus bounded, topology-driven `FusedExecutionRegion` formation | Historical only: both sequential implementations were later removed and never established F2/F3 reduction |
 | 37 | Replaced scalar FP32 zero placeholder with `None` for omitted optional inputs | Type-agnostic optional input handling |
 | 43–44 | Reconciled academic/public-source attribution and AI-assistance disclosure with the implementation | TVM, DNNFusion, MLIR Linalg, CUDA Graphs, GitHub Copilot, and OpenAI Codex are disclosed; keep current after later revisions |
 | 46 | Ran the exact bounded-region revision's standard workflow on the remote H200 | All three released models pass; process-accounted NVML memory remains #39 |
@@ -349,7 +349,7 @@ gate and [remaining problems](remaining-problems.md) for unclosed items.
 
 ### 2026-07-13 three-model H200 black-box report review
 
-- Examined `docs/c35_reports/1.json` from a CuPy 14.1.1 run on an NVIDIA H200
+- Examined a captured CuPy 14.1.1 report from an NVIDIA H200
   NVL MIG 1g.18gb. All three full released datasets passed output-contract and
   golden `allclose` gates; MLP accuracy was `0.9835`, ResNet-18 accuracy was
   `0.9351`, and Transformer required no classification threshold.
@@ -404,7 +404,7 @@ gate and [remaining problems](remaining-problems.md) for unclosed items.
   logical intermediate-buffer counts. Running `python3 -m c33.test_c33` on the
   H200 can reproduce those structural results, but the metrics themselves are
   graph/lowering properties rather than device measurements.
-- The current `FusedExecutionRegion` reference lowering iterates through its
+- At that revision, the `FusedExecutionRegion` reference lowering iterated through its
   retained operator program and dispatches each CuPy operation separately.
   Therefore neither the H200 correctness report nor the structural C3.3 test
   proves a reduction in physical CUDA/AEC launches or allocations.
@@ -429,7 +429,7 @@ gate and [remaining problems](remaining-problems.md) for unclosed items.
   launch/logical-buffer counts, all below the 60% target.
 - The output shape (`6 -> 4`, `48 -> 31`, `165 -> 127`) and 51-check total
   identify a revision-parity failure: the H200 checkout predates or does not
-  execute the current `FusedExecutionRegion` pass (`6 -> 1`, `48 -> 12`,
+  execute that revision's `FusedExecutionRegion` pass (`6 -> 1`, `48 -> 12`,
   `165 -> 65` locally). Problem #5 is reopened until the exact current revision
   is synchronized and rerun on the target.
 - Both cross-stage tests passed. Five of six combined tests passed; the
@@ -477,7 +477,7 @@ gate and [remaining problems](remaining-problems.md) for unclosed items.
 
 ### 2026-07-13 problem 27 physical-lowering audit
 
-- The current `FusedExecutionRegion` admits nearly every single-output operator,
+- At that revision, `FusedExecutionRegion` admitted nearly every single-output operator,
   but its CuPy lowering loops over the retained program and calls each original
   operator separately. `PlannedGraphExecutor` similarly deduplicates C3.4 steps
   by node ID and then executes the high-level graph node. The current physical
@@ -752,5 +752,53 @@ gate and [remaining problems](remaining-problems.md) for unclosed items.
   filename, input/weight hash, evaluator modification, precomputed artifact,
   hidden-case branch, network access, or new dependency. Existing CuPy and
   OpenAI Codex disclosures remain sufficient.
+
+### 2026-07-13 framework cleanup
+
+- Removed the unused sequential `FusedComputeActivation` and
+  `FusedExecutionRegion` stacks across graph matching, runtime execution,
+  dispatch registration, and test-only region ABI. The active generated-kernel
+  fusion pipeline and all five required F1 patterns are unchanged.
+- Replaced the duplicate 434-line `c31.ir.graph` implementation with a
+  compatibility re-export of the shared `c3common` IR. Consolidated DAG JSON
+  generation in `c31.export_dag`; the evaluator-required root command is now a
+  thin wrapper over that implementation.
+- Removed unused imports, the dead elementwise dispatch copy, and the misspelled
+  internal `TUMABLE_OPS` name. Added the already-implemented Sub, Exp, and Sqrt
+  operators to the live executor dispatch rather than retaining a dead private
+  table.
+- Preserved all seven tracked validation reports under `docs/` as durable
+  release evidence. Added non-destructive `export-ignore` rules so repository
+  evidence remains available while competition archives omit generated reports.
+  Updated `run_all.sh` to fail fast and include the focused contract, fusion,
+  plan, cross-stage, and scoring suites.
+- Fixed the archive scanner's leading-hyphen regex handling and validated the
+  exact staged tree: 65 archive entries, all 11 required entries present, and
+  zero forbidden artifacts.
+- Local evidence: C3.1 passes `7/7`; C3.2 policy/contract passes `12/12` and
+  structural scoring remains `14.17/15`; C3.3 passes `61/61`, reports
+  `15.00/15.0` structurally, and its focused executable-fusion suite passes
+  `8/8`; C3.4 passes `387/387` and its executable-plan suite passes `6/6`.
+  CuPy-dependent C3.3/C3.5/scoring suites remain H200-only and were not run on
+  this machine.
+- Integrity gate: cleanup decisions were based on import/call reachability,
+  active pipeline registration, and packaging policy. No model/test identifier,
+  input/weight hash, evaluator hook, precomputed output, network access, or new
+  dependency was introduced. Existing ONNX, CuPy, public-reference, and OpenAI
+  Codex disclosures remain sufficient.
+
+### 2026-07-13 cleanup evidence-preservation correction
+
+- Restored every tracked report under `docs/c35_reports/` and
+  `docs/c3_reports/`; none remains staged for deletion.
+- Replaced destructive report cleanup with repository-preserving packaging:
+  `.gitattributes` excludes the report directories only from `git archive`,
+  while the reports remain versioned and readable in the source repository.
+- Added the durable rule to `.agents/skills/c3-track/SKILL.md`: general cleanup
+  must preserve documentation and validation evidence by default, and any
+  packaging exclusion must be non-destructive and explicitly auditable.
+- Integrity gate: this correction restores evidence and changes packaging
+  metadata only. It adds no runtime behavior, evaluator bypass, dependency,
+  precomputed inference output, model-specific branch, or network access.
 
 [remaining-problems](remaining-problems.md) · [root submission disclosure](../README.md#submission-disclosure)

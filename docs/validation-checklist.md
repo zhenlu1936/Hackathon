@@ -109,6 +109,7 @@ python3 -m c34.test_c34
 python3 -m unittest -v c35.test_c35 c35.test_cross_stage
 python3 -m unittest -v c3common.test_scoring_regressions
 ./run_c35.sh
+bash scripts/build_submission.sh /tmp/c3-submission.tar.gz HEAD
 ```
 
 ## Package cleanliness

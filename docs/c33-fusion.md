@@ -62,11 +62,9 @@ The connected single-launch lowerings are:
 Every generated kernel accepts the C3.4 planned output view, so the plan-driven
 executor does not append a device copy after the fused launch.
 
-The bounded `FusedExecutionRegion` ABI remains available for tests and future
-code generation, but it is disabled in the default pipeline because its
-reference executor runs the retained operations sequentially. The same applies
-to the sequential compute-activation utility. Neither may be counted as one
-launch.
+The former sequential `FusedExecutionRegion` and `FusedComputeActivation`
+reference paths have been removed. They had no single-kernel lowering and
+therefore could not truthfully contribute to launch reduction.
 
 The new passes are semantic and topology-driven. They inspect operator types,
 shapes, attributes, fan-out, and broadcast compatibility, never graph/model
@@ -108,7 +106,7 @@ Run validation after each pass, not only at pipeline completion.
 - Original versus optimized graph validation result.
 - Original versus optimized versus golden numerical report.
 
-The current dependency-light self-test passes `68/68` and reports executable
+The current dependency-light self-test passes `61/61` and reports executable
 lowering reductions of MLP `66.7%/75.0%`, ResNet-18 `62.7%/63.5%`, and
 Transformer `63.6%/61.6%` for launches/logical buffers. Eight focused
 regressions verify the 60% anchors, one-kernel decompositions, optimized-plan
@@ -119,7 +117,7 @@ These are local structural results. The generated RawKernels and full optimized
 graphs still require CuPy 14.1.1/H200 compilation, original-versus-optimized
 `max_abs_diff <= 1e-3`, and observed-launch profiling before the revision is
 organizer-facing score evidence. The earlier sequential-region figures remain
-superseded.
+superseded; their implementation and test-only ABI are no longer shipped.
 
 ## Public design references
 

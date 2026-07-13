@@ -2,7 +2,7 @@
 # Build and verify a clean submission archive.
 #
 # Usage:
-#   bash scripts/build_submission.sh [OUTPUT]
+#   bash scripts/build_submission.sh [OUTPUT] [REVISION]
 #
 # This script:
 #   1. Exports the tracked files in HEAD (`export-ignore` attributes apply;
@@ -17,6 +17,7 @@
 set -euo pipefail
 
 OUTPUT="${1:-submission.tar.gz}"
+REVISION="${2:-HEAD}"
 FORBIDDEN_PATTERNS=(
     '__pycache__/'
     '\.pyc$'
@@ -37,6 +38,8 @@ FORBIDDEN_PATTERNS=(
     '\.ssh/'
     '\.agents/'
     '\.specification/'
+    'docs/c35_reports/'
+    'docs/c3_reports/'
     '\.vscode/'
     '\.idea/'
     'output/'
@@ -58,7 +61,7 @@ if ! git rev-parse --git-dir >/dev/null 2>&1; then
     exit 1
 fi
 
-git archive --format=tar.gz --output="$OUTPUT" HEAD
+git archive --format=tar.gz --output="$OUTPUT" "$REVISION"
 echo "Archive created: $OUTPUT ($(du -h "$OUTPUT" | cut -f1))"
 echo ""
 
@@ -77,7 +80,7 @@ echo ""
 echo "=== Forbidden-pattern scan ==="
 while IFS= read -r member; do
     for pattern in "${FORBIDDEN_PATTERNS[@]}"; do
-        if echo "$member" | grep -Eq "$pattern"; then
+        if echo "$member" | grep -Eq -- "$pattern"; then
             echo "  VIOLATION: $member  (matches '$pattern')"
             VIOLATIONS+=("$member")
             ((FAIL++)) || true

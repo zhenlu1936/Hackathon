@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import math
 from enum import Enum
 from typing import Any, Dict, List, Optional, Set
 
-from c3common.ir.graph import Graph, Node, ONNSType
+from c3common.ir.graph import Graph, Node
 from c32.hardware import HardwareCapability
 from c32.kernel_spec import KernelSpecRef, KernelTuningParams, PrecisionProfile, ProblemSize
 from c32.decompositions import DECOMPOSE_DISPATCH
@@ -31,7 +30,7 @@ SENSITIVE_OPS: Set[str] = {
     "FusedResidualNorm", "FusedSoftmaxDropout",
 }
 
-TUMABLE_OPS: Set[str] = {"MatMul", "Linear", "Gemm", "Conv", "Conv2d"}
+TUNABLE_OPS: Set[str] = {"MatMul", "Linear", "Gemm", "Conv", "Conv2d"}
 
 # Safe fallback order after an engineering rule chooses a preferred precision.
 # Lower precision is never selected merely because it appears in this list.
@@ -97,7 +96,7 @@ class Strategy:
                                     input_dtype="fp32", output_dtype="fp32")
 
         # Rule 3: Tunable ops may use lower precision
-        if op in TUMABLE_OPS:
+        if op in TUNABLE_OPS:
             preferred = self._preferred_tunable_precision(node, graph)
             chosen = self._supported_fallback(preferred)
             # FP4 is used only as W4A16: activations remain FP16 while constant

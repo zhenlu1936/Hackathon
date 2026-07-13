@@ -14,9 +14,9 @@ Usage:
 from __future__ import annotations
 
 import copy
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List
 
-from c3common.ir.graph import Graph, Node
+from c3common.ir.graph import Graph
 
 from c33.fusion import (
     fuse_matmul_bias,
@@ -30,7 +30,6 @@ from c33.fusion import (
     fuse_transpose_reshape,
     fuse_layer_normalization_kernels,
     cleanup_dead_tensors,
-    ELEMENTWISE_OPS,
 )
 
 
@@ -186,8 +185,6 @@ class GraphPassPipeline:
 
         # Run each pass
         for pass_name, pass_fn in PASS_ORDER:
-            if not self.enable_fusion:
-                break
             snapshot = copy.deepcopy(graph)
             log_len = len(fusion_log)
             try:
@@ -213,10 +210,7 @@ class GraphPassPipeline:
 
         # Cleanup dead tensors
         if self.enable_dead_cleanup:
-            try:
-                cleanup_dead_tensors(graph, fusion_log)
-            except Exception:
-                pass
+            cleanup_dead_tensors(graph)
 
         # Re-sort and validate
         try:

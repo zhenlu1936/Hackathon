@@ -10,16 +10,15 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from typing import Any, Dict, List, Tuple
+from typing import Dict, List, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from c31.import_onnx import import_onnx
 from c3common.ir.graph import Graph, Node
 from c32.api import strategy, hardware
-from c32.hardware import HardwareCapability, set_hardware
-from c32.kernel_spec import PrecisionProfile, KernelSpecRef, KernelTuningParams
-from c32.strategy import ExecutionMode, SENSITIVE_OPS, TUMABLE_OPS
+from c32.kernel_spec import PrecisionProfile, KernelSpecRef
+from c32.strategy import ExecutionMode, SENSITIVE_OPS, TUNABLE_OPS
 
 # CuPy is required on the AEC H200 for numerical verification.
 # On macOS or other non-CUDA environments the numerical test is skipped.
@@ -214,7 +213,7 @@ def test_d1_precision(graphs: Dict[str, Graph]) -> float:
     score += d1b_score
     print(f"  D1b: Precisions used: {sorted(precisions_used)} (target coverage: {diversity_count}/4)  [{d1b_score:.2f} pt]")
 
-    tunable_nodes = [(g, n, p) for g, n, p in all_profiles if n.op_type in TUMABLE_OPS]
+    tunable_nodes = [(g, n, p) for g, n, p in all_profiles if n.op_type in TUNABLE_OPS]
     supported = hardware.supported_precisions()
     in_supported = sum(1 for _, _, p in tunable_nodes if p.compute_dtype in supported)
     total_tun = len(tunable_nodes)
