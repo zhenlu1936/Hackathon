@@ -16,6 +16,23 @@ from c32.kernel_spec import KernelSpecRef
 from c34.execution_plan import LifetimeInterval
 
 
+_DTYPE_SIZE_BYTES = {
+    "FLOAT": 4,
+    "FLOAT16": 2,
+    "BFLOAT16": 2,
+    "DOUBLE": 8,
+    "INT8": 1,
+    "UINT8": 1,
+    "BOOL": 1,
+    "INT16": 2,
+    "UINT16": 2,
+    "INT32": 4,
+    "UINT32": 4,
+    "INT64": 8,
+    "UINT64": 8,
+}
+
+
 def _tensor_size_bytes(
     graph: Graph,
     tensor_name: str,
@@ -28,16 +45,19 @@ def _tensor_size_bytes(
     """
     tensor = graph.tensors.get(tensor_name)
     if tensor is not None:
-        sz = tensor.size_bytes()
-        if sz is not None:
-            return sz
         # ONNX represents a scalar with an empty dimension list.  Constant
         # scalar outputs still occupy one element on device.
         if tensor.is_constant and not tensor.shape:
-            return 4
-        # Try resolving symbolic dims manually
+            return _DTYPE_SIZE_BYTES.get(tensor.dtype.value, 4)
+        # Resolve all shapes here instead of calling Tensor.size_bytes() first:
+        # that helper does not concretize dynamic dimensions, and an integer
+        # ``-1`` would otherwise produce a negative allocation size.
         if tensor.shape:
-            return _compute_size_with_batch(tensor.shape, batch_size)
+            return _compute_size_with_batch(
+                tensor.shape,
+                batch_size,
+                elem_bytes=_DTYPE_SIZE_BYTES.get(tensor.dtype.value, 4),
+            )
     return 0
 
 
@@ -52,14 +72,19 @@ def _compute_size_with_batch(
         if d is None:
             return 0
         try:
-            total *= int(d)
+            dimension = int(d)
         except (ValueError, TypeError):
             if isinstance(d, str) and (
                 d.lower() in ("n", "batch", "b") or d.startswith("unk__")
             ):
-                total *= batch_size
+                dimension = batch_size
             else:
                 return 0  # unknown symbolic dim
+        if dimension == -1:
+            dimension = batch_size
+        elif dimension < 0:
+            return 0
+        total *= dimension
     return total
 
 
@@ -127,7 +152,10 @@ def compute_lifetimes(
             continue
 
         size_bytes = _tensor_size_bytes(graph, tname, batch_size)
-        is_weight = tname in initializer_names
+        tensor = graph.tensors.get(tname)
+        is_weight = tname in initializer_names or bool(
+            tensor is not None and tensor.is_constant
+        )
         is_output = tname in output_names
         is_input = tname in input_names and tname not in initializer_names
 
@@ -140,6 +168,7 @@ def compute_lifetimes(
             is_output=is_output,
             is_input=is_input,
             producers=tensor_producers.get(tname, []),
+            consumers=[str(index) for index in tensor_consumers.get(tname, [])],
         )
 
     return lifetimes

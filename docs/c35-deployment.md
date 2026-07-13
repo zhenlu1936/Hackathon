@@ -11,12 +11,32 @@ is the designated AEC device for this release. No CPU array fallback is part of
 the framework. The timed command performs no network access and generates
 outputs from supplied inputs.
 
-The released implementation uses CuPy/CUDA as its only connected H200
-backend. It applies C3.3 to the shared graph, builds the C3.4 plan through C3.2
-decomposition, validates bindings/events and plan/graph identity, and executes
-nodes in planned order. Weights and batches move to CuPy once and final outputs
-return to the host once. Numerical qualification remains an internal test path
-and is not exposed through the evaluator-facing CLI.
+The implementation uses CuPy/CUDA as its only connected H200 backend. The
+current working revision applies C3.3 to the shared graph, expands nodes into
+individual C3.2 references, builds a unified C3.4 per-kernel timeline, validates
+bindings/events and plan/graph identity, and dispatches through a submitted
+CuPy kernel registry using arena views, copy/compute streams, and events. Report
+8 qualifies this direct-kernel path across all three released models on H200.
+Most kernels still do not make their tuning parameters control a physical
+launch. Numerical qualification remains an internal test path and is not
+exposed through the evaluator-facing CLI.
+Logical copy/compute streams persist across all batches, plan events are reused
+after synchronization, and real fused Softmax+Dropout and Residual+LayerNorm
+kernels can write directly into planned output views. Final logits are copied
+into their preallocated full-dataset positions rather than retained as one
+allocation per batch and concatenated afterward.
+Generated Gemm/MatMul epilogues, attention scores, single-output
+LayerNormalization, elementwise chains, Transpose+Reshape, and the final Conv
+activation/residual epilogues write directly into planned arena views. Conv
+contraction itself temporarily uses the BLAS-backed im2col/`cupy.dot` path after
+the prior direct kernel regressed H200 ResNet performance. Generated source is
+compiled during execution; no precompiled kernel or generated model answer is
+shipped. The current H200 standard run passes all three released models and
+reports ResNet accuracy `0.9351`, `max_abs_diff=1.53e-05`, and `8.275 s`
+external wall time. Physical-launch and process-accounted-memory gates remain
+open. Report 8 records a `3,358,545,408`-byte CuPy-pool reservation, `2.37x`
+the `1,418,311,232`-byte planned peak, so im2col temporary allocation remains a
+priority for trace-based memory optimization.
 The CLI exposes no backend selector; CuPy is the mandatory implementation.
 
 ## CLI and data contract
@@ -61,8 +81,8 @@ Treat `--batch-size` as a maximum processing chunk:
 1. Validate it is positive.
 2. Slice all inputs on dimension 0 with identical boundaries.
 3. Concretize dynamic `N` for that chunk.
-4. Execute and collect outputs.
-5. Concatenate in original order.
+4. Execute and copy the arena-backed result into its final sample range.
+5. Reuse the same physical streams/events and planned arena on the next chunk.
 6. Verify the final leading dimension equals input `N`.
 
 Do not require 10,000 samples or a particular batch size. Test `N` smaller than, equal to, and not divisible by the requested batch size.
@@ -89,7 +109,12 @@ Gemm dominates. Fuse bias and activation where possible. Large batch chunks impr
 
 ### ResNet
 
-3x3 Conv dominates. Support both Winograd and im2col/direct alternatives, preserve residual Add semantics, and verify FP32 closely because accumulated low-precision error can exceed `1e-3`. BatchNorm is already folded into Conv weights.
+3x3 Conv dominates. The default path uses BLAS-backed im2col contraction plus a
+generated Relu or residual-Add+Relu epilogue. Do not re-enable a direct or
+implicit-GEMM fused contraction until it beats this fallback in cold H200 wall
+time and passes the FP32 numerical gate. Preserve residual Add semantics and
+verify closely because accumulated low-precision error can exceed `1e-3`.
+BatchNorm is already folded into Conv weights.
 
 ### Transformer
 

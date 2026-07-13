@@ -11,11 +11,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 import os
-
-# Add parent directory to path for direct script execution
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import sys
 
 from c31.import_onnx import import_onnx
 
@@ -60,9 +57,6 @@ def main() -> None:
     with open(output_path, "w") as f:
         json.dump(dag_json, f, indent=2, ensure_ascii=False, sort_keys=False)
         f.write("\n")
-
-    sys.exit(0)
-
 
 if __name__ == "__main__":
     main()

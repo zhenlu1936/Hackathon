@@ -17,11 +17,10 @@ venv/
 env/
 
 # Generated / cached artifacts (must not enter submission)
+submission.tar.gz
 *.dag.json
 *-report.json
 c35-standard-report.json
-output/
-*.pyc
 output/
 *.plan.json
 c35-standard-report*.json

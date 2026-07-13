@@ -1,0 +1,11 @@
+# Preserve validation evidence in the repository while excluding generated
+# reports from the competition submission archive.
+docs/c35_reports/ export-ignore
+docs/c35_reports/** export-ignore
+docs/c3_reports/ export-ignore
+docs/c3_reports/** export-ignore
+# Historical transcripts are preserved byte-for-byte, including terminal
+# prompts that may contain trailing spaces.
+docs/c35_reports/** -whitespace
+docs/c3_reports/** -whitespace
+.agents/ export-ignore

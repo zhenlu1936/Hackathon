@@ -1,0 +1,24 @@
+test_add_broadcasts_higher_rank (c35.test_c35.C35Opset17AttributeTests.test_add_broadcasts_higher_rank) ... ok
+test_constant_tensor_and_scalar_attributes_are_loaded (c35.test_c35.C35Opset17AttributeTests.test_constant_tensor_and_scalar_attributes_are_loaded) ... ok
+test_conv_dilation_same_lower_and_group (c35.test_c35.C35Opset17AttributeTests.test_conv_dilation_same_lower_and_group) ... /usr/local/lib/python3.12/dist-packages/cupy/_padding/pad.py:408: DeprecationWarning: Setting the shape on a NumPy array has been deprecated in NumPy 2.5.
+As an alternative, you can create a new view using np.reshape (with copy=False if needed).
+  x_view.shape = (ndim, 2)
+ok
+test_div_broadcasts_non_scalar_denominator (c35.test_c35.C35Opset17AttributeTests.test_div_broadcasts_non_scalar_denominator) ... ok
+test_erf_and_mul_hidden_style_broadcast (c35.test_c35.C35Opset17AttributeTests.test_erf_and_mul_hidden_style_broadcast) ... ok
+test_flatten_nondefault_axis_is_always_rank_two (c35.test_c35.C35Opset17AttributeTests.test_flatten_nondefault_axis_is_always_rank_two) ... ok
+test_gather_negative_axis_preserves_data_dtype (c35.test_c35.C35Opset17AttributeTests.test_gather_negative_axis_preserves_data_dtype) ... ok
+test_gemm_transpose_a_alpha_beta_and_broadcast_bias (c35.test_c35.C35Opset17AttributeTests.test_gemm_transpose_a_alpha_beta_and_broadcast_bias) ... ok
+test_global_average_pool_supports_extra_spatial_rank (c35.test_c35.C35Opset17AttributeTests.test_global_average_pool_supports_extra_spatial_rank) ... ok
+test_layer_norm_axis_one_and_optional_outputs (c35.test_c35.C35Opset17AttributeTests.test_layer_norm_axis_one_and_optional_outputs) ... ok
+test_matmul_broadcasts_batch_dimensions (c35.test_c35.C35Opset17AttributeTests.test_matmul_broadcasts_batch_dimensions) ... ok
+test_relu_accepts_non_matrix_shape (c35.test_c35.C35Opset17AttributeTests.test_relu_accepts_non_matrix_shape) ... ok
+test_reshape_zero_copies_input_dimension (c35.test_c35.C35Opset17AttributeTests.test_reshape_zero_copies_input_dimension) ... ok
+test_softmax_nonlast_axis (c35.test_c35.C35Opset17AttributeTests.test_softmax_nonlast_axis) ... ok
+test_split_uses_opset17_sizes_input (c35.test_c35.C35Opset17AttributeTests.test_split_uses_opset17_sizes_input) ... ok
+test_transpose_default_reverses_axes (c35.test_c35.C35Opset17AttributeTests.test_transpose_default_reverses_axes) ... ok
+
+----------------------------------------------------------------------
+Ran 16 tests in 0.442s
+
+OK

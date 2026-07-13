@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 import unittest
 
 import cupy as cp
@@ -17,6 +18,12 @@ from c34.scheduler import ExecutionScheduler
 from c35.engine import execute_op, op_conv
 
 
+MODELS = (
+    Path(__file__).resolve().parents[1] / ".specification" / "testcases"
+    / "release_to_competitors" / "models"
+)
+
+
 class ScoringRegressionTests(unittest.TestCase):
     def test_direct_hardware_switch_updates_public_references(self) -> None:
         old = replace(c32_api.hardware)
@@ -29,7 +36,7 @@ class ScoringRegressionTests(unittest.TestCase):
             self.assertEqual(c32_api.hardware.name, "tiny")
             self.assertEqual(c32_api.strategy.hardware.name, "tiny")
 
-            graph = import_onnx("models/mlp_v1.onnx")
+            graph = import_onnx(str(MODELS / "mlp_v1.onnx"))
             node = next(n for n in graph.nodes.values() if n.op_type == "Gemm")
             precision = c32_api.strategy.select_precision(node, graph)
             ref = c32_api.strategy.decompose(node, graph, precision)[0]
@@ -60,13 +67,16 @@ class ScoringRegressionTests(unittest.TestCase):
         fused = next(n for n in graph.nodes.values() if n.op_type == "FusedConv2dBatchNorm")
         self.assertEqual(fused.inputs[-4:], ["bn_scale", "bn_bias", "bn_mean", "bn_var"])
 
-        rng = cp.random.default_rng(7)
-        x = rng.normal(size=(1, 3, 5, 5)).astype(cp.float32)
-        weight = rng.normal(size=(16, 3, 3, 3)).astype(cp.float32)
-        scale = rng.normal(size=16).astype(cp.float32)
-        bias = rng.normal(size=16).astype(cp.float32)
-        mean = rng.normal(size=16).astype(cp.float32)
-        var = cp.abs(rng.normal(size=16)).astype(cp.float32) + 0.1
+        # Deterministic ramps avoid depending on random.Generator methods that
+        # are not uniformly available in the organizer's CuPy 14.1.1 build.
+        x = cp.linspace(-1.0, 1.0, 75, dtype=cp.float32).reshape(1, 3, 5, 5)
+        weight = cp.linspace(
+            -0.5, 0.5, 16 * 3 * 3 * 3, dtype=cp.float32
+        ).reshape(16, 3, 3, 3)
+        scale = cp.linspace(0.5, 1.5, 16, dtype=cp.float32)
+        bias = cp.linspace(-0.2, 0.2, 16, dtype=cp.float32)
+        mean = cp.linspace(-0.1, 0.1, 16, dtype=cp.float32)
+        var = cp.linspace(0.1, 1.6, 16, dtype=cp.float32)
         actual = execute_op(
             fused.op_type, [x, weight, scale, bias, mean, var], fused.attributes
         )
@@ -82,7 +92,8 @@ class ScoringRegressionTests(unittest.TestCase):
     def test_all_public_execution_plans_have_complete_bindings(self) -> None:
         for model in ("mlp", "resnet", "transformer"):
             with self.subTest(model=model):
-                plan = ExecutionScheduler(import_onnx(f"models/{model}_v1.onnx")).build()
+                model_path = MODELS / f"{model}_v1.onnx"
+                plan = ExecutionScheduler(import_onnx(str(model_path))).build()
                 self.assertEqual(plan.validate(), [])
                 transfer_events = {
                     t.event_id for t in plan.transfers if t.event_id is not None

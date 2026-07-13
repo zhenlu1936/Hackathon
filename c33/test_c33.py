@@ -11,7 +11,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -23,7 +23,6 @@ from c33.fusion import (
     fuse_elementwise_chain,
     fuse_softmax_dropout,
     fuse_residual_norm,
-    cleanup_dead_tensors,
 )
 
 try:
@@ -34,7 +33,7 @@ except ImportError:
 
 MODELS_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "models",
+    ".specification", "testcases", "release_to_competitors", "models",
 )
 MODEL_PATHS = {
     "mlp": os.path.join(MODELS_DIR, "mlp_v1.onnx"),
@@ -622,9 +621,17 @@ def test_pipeline_integration() -> float:
 
 
 def test_real_models() -> float:
-    """Test the pipeline on real ONNX models from the release package."""
-    print("\n--- Real models (bonus validation) ---")
+    """Test released models and compute the written-rubric F2/F3 self-score.
+
+    The published C3.2/C3.3 benchmark names MLP and ResNet-18. Transformer is
+    retained as additional validation, but it does not dilute or inflate the
+    two-model F2/F3 score.
+    """
+    print("\n--- Real models (F2/F3 rubric validation) ---")
     score = 0.0
+    official_models = {"mlp", "resnet"}
+    official_stats: Dict[str, Dict[str, Any]] = {}
+    official_invariants: Dict[str, Dict[str, bool]] = {}
 
     if not HAS_ONNX:
         print("  SKIP: onnx package not available")
@@ -638,6 +645,8 @@ def test_real_models() -> float:
         try:
             graph = _import_onnx(model_path)
             node_count_before = len(graph.nodes)
+            input_names_before = {tensor.name for tensor in graph.inputs}
+            output_names_before = {tensor.name for tensor in graph.outputs}
 
             pipeline = GraphPassPipeline(enable_fusion=True, run_validation=True)
             results = pipeline.run(graph)
@@ -654,12 +663,77 @@ def test_real_models() -> float:
             check(stats["validation_passed"], f"{model_name}: validation passed", 0.1)
             check(stats["node_count_after"] <= node_count_before,
                   f"{model_name}: nodes not increased", 0.1)
+            check(stats["launch_reduction"] >= 0.60,
+                  f"{model_name}: structural launch reduction reaches 60%")
+            check(stats["buffer_reduction"] >= 0.60,
+                  f"{model_name}: logical buffer reduction reaches 60%")
 
             score += 0.2
+            if model_name in official_models:
+                official_stats[model_name] = stats
+                official_invariants[model_name] = {
+                    "inputs_preserved": (
+                        {tensor.name for tensor in graph.inputs}
+                        == input_names_before
+                    ),
+                    "outputs_preserved": (
+                        {tensor.name for tensor in graph.outputs}
+                        == output_names_before
+                    ),
+                    "validation_passed": bool(stats["validation_passed"]),
+                    "nodes_not_increased": (
+                        stats["node_count_after"] <= node_count_before
+                    ),
+                }
         except Exception as e:
             print(f"  {model_name}: ERROR {e}")
 
-    print(f"  Real model score: {score:.2f} / 0.6 pt")
+    # Apply the written formula separately to each specified model. The release
+    # does not include the referenced benchmark or define its cross-model
+    # aggregation rule, so this self-test displays every model score and uses a
+    # conservative mean for its local summary. Full credit still requires both
+    # models to reach the 60% anchor.
+    f2_per_model = {
+        name: min(max(stats["launch_reduction"], 0.0) * 5.0, 3.0)
+        for name, stats in official_stats.items()
+    }
+    f3_per_model = {
+        name: min(max(stats["buffer_reduction"], 0.0) * 5.0, 3.0)
+        for name, stats in official_stats.items()
+    }
+    if official_models <= official_stats.keys():
+        f2_score = sum(f2_per_model.values()) / len(official_models)
+        f3_score = sum(f3_per_model.values()) / len(official_models)
+    else:
+        f2_score = 0.0
+        f3_score = 0.0
+
+    invariant_names = (
+        "inputs_preserved", "outputs_preserved",
+        "validation_passed", "nodes_not_increased",
+    )
+    f4_structural = sum(
+        1.0 for invariant in invariant_names
+        if official_models <= official_invariants.keys()
+        and all(official_invariants[name][invariant] for name in official_models)
+    )
+
+    for name in sorted(official_models):
+        if name in official_stats:
+            print(
+                f"  {name} rubric: F2={f2_per_model[name]:.2f}/3.0, "
+                f"F3={f3_per_model[name]:.2f}/3.0"
+            )
+    print(f"  F2 public-model mean: {f2_score:.2f} / 3.0 pt")
+    print(f"  F3 public-model mean: {f3_score:.2f} / 3.0 pt")
+    print(
+        f"  F4 structural: {f4_structural:.2f} / 4.0 pt "
+        "(subject to the required FP32 numerical gate)"
+    )
+    print(f"  Structural diagnostics: {score:.2f} / 0.6 checks")
+    SCORES["F2"] = f2_score
+    SCORES["F3"] = f3_score
+    SCORES["F4Structural"] = f4_structural
     SCORES["RealModels"] = score
     return score
 
@@ -744,6 +818,44 @@ def test_graph_invariants() -> float:
     return score
 
 
+def test_fusion_safety_guards() -> None:
+    """Exercise guards for observable values and opset-17 optional inputs."""
+    print("\n--- Fusion safety guards ---")
+
+    graph = _make_matmul_bias_graph()
+    graph.outputs.append(_make_tensor("mm_out", ["batch", 8]))
+    log: List[Dict[str, Any]] = []
+    check(fuse_matmul_bias(graph, log) == 0,
+          "Observable MatMul intermediate is not erased")
+    graph.validate()
+
+    graph = _make_matmul_bias_graph()
+    graph.tensors["bias"].shape = [2, 4]
+    log = []
+    check(fuse_matmul_bias(graph, log) == 0,
+          "Incompatible rank-2 Add operand is not treated as bias")
+    graph.validate()
+
+    graph = _make_softmax_dropout_graph()
+    dropout = graph.nodes["dp1"]
+    graph.register_tensor("training", dtype=ONNSType.BOOL, shape=[],
+                          is_initializer=True)
+    graph.tensor_producer["training"] = "INITIALIZER"
+    graph.replace_node_inputs("dp1", dropout.inputs,
+                              ["sm_out", "", "training"])
+    log = []
+    check(fuse_softmax_dropout(graph, log) == 0,
+          "Unknown explicit training_mode input blocks Dropout fusion")
+    graph.validate()
+
+    graph = _make_residual_norm_graph()
+    graph.outputs.append(_make_tensor("add_out", ["batch", 32]))
+    log = []
+    check(fuse_residual_norm(graph, log) == 0,
+          "Observable residual value is not erased")
+    graph.validate()
+
+
 # ── Main ──────────────────────────────────────────────────────────────
 
 
@@ -753,27 +865,36 @@ def print_summary() -> None:
     print("=" * 50)
     total = 0.0
 
-    categories = [
+    official_categories = [
         ("F1a: MatMulBias", SCORES.get("F1a", 0), 1.0),
         ("F1b: Conv2dBatchNorm", SCORES.get("F1b", 0), 1.0),
         ("F1c: EWChain", SCORES.get("F1c", 0), 1.0),
         ("F1d: SoftmaxDropout", SCORES.get("F1d", 0), 1.0),
         ("F1e: ResidualNorm", SCORES.get("F1e", 0), 1.0),
-        ("F2/F3/F4: Pipeline", SCORES.get("Pipeline", 0), 2.0),
-        ("Bonus: Real models", SCORES.get("RealModels", 0), 0.6),
+        ("F2: Launch reduction", SCORES.get("F2", 0), 3.0),
+        ("F3: Buffer reduction", SCORES.get("F3", 0), 3.0),
+        ("F4: Structural correctness", SCORES.get("F4Structural", 0), 4.0),
+    ]
+    diagnostic_categories = [
+        ("Pipeline diagnostics", SCORES.get("Pipeline", 0), 2.0),
+        ("Real-model diagnostics", SCORES.get("RealModels", 0), 0.6),
         ("Counting", SCORES.get("Counting", 0), 0.5),
         ("Invariants", SCORES.get("Invariants", 0), 0.5),
     ]
 
-    for name, s, mx in categories:
+    for name, s, mx in official_categories:
         capped = min(s, mx)
         total += capped
         stars = "\u2605" * int(round(capped * 5)) + "\u2606" * int(round(mx * 5 - capped * 5))
         print(f"  {name}: {capped:.2f}/{mx} {stars}")
-    maximum = 8.6
+    maximum = 15.0
     total = min(total, maximum)
-    print(f"  {'\u2500' * 13}")
-    print(f"  TOTAL: {total:.2f}/{maximum}")
+    print("  " + "\u2500" * 13)
+    print(f"  WRITTEN-RUBRIC STRUCTURAL TOTAL: {total:.2f}/{maximum}")
+    print("  F4 becomes 0 if the required FP32 numerical comparison fails.")
+    print("\n  Additional self-test diagnostics (not scoring points):")
+    for name, s, mx in diagnostic_categories:
+        print(f"    {name}: {min(s, mx):.2f}/{mx}")
     print(f"  {'PASS' if FAIL == 0 else 'SOME FAILURES'} "
           f"(PASS={PASS}, FAIL={FAIL})")
     print()
@@ -796,6 +917,7 @@ def main() -> int:
     test_real_models()
     test_counting()
     test_graph_invariants()
+    test_fusion_safety_guards()
 
     print_summary()
     return 0 if FAIL == 0 else 1

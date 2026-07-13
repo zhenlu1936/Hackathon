@@ -1,0 +1,168 @@
+{
+  "format_version": "1.0",
+  "command_template": "python3 -m c35.deploy --onnx {onnx} --input {input} --output {output} --batch-size {batch_size}",
+  "batch_size": 256,
+  "cupy_preflight": {
+    "passed": true,
+    "cupy_version": "14.1.1",
+    "cuda_runtime_version": 13020,
+    "device_count": 1,
+    "device_id": 0,
+    "device_name": "NVIDIA H200 NVL MIG 1g.18gb",
+    "smoke_checksum": 3920.0
+  },
+  "written_scoring": {
+    "correctness_accuracy_points": 15,
+    "runtime_points": 25,
+    "peak_gpu_memory_points": 10
+  },
+  "score_summary": {
+    "correctness_accuracy": {
+      "earned": 0,
+      "available": 15,
+      "eligible": true,
+      "reason": null
+    },
+    "runtime": {
+      "earned": null,
+      "available": 25,
+      "reason": "ranked across submissions"
+    },
+    "peak_gpu_memory": {
+      "earned": null,
+      "available": 10,
+      "reason": "ranked across submissions"
+    },
+    "known_points": 0
+  },
+  "all_passed": false,
+  "results": [
+    {
+      "model": "mlp",
+      "command": [
+        "python3",
+        "-m",
+        "c35.deploy",
+        "--onnx",
+        "/home/mig06/Hackathon/.specification/testcases/release_to_competitors/models/mlp_v1.onnx",
+        "--input",
+        "/home/mig06/Hackathon/.specification/testcases/release_to_competitors/testdata/c35/mlp_v1/input",
+        "--output",
+        "/tmp/c35-standard-mlp-pua3z3l_/output",
+        "--batch-size",
+        "256"
+      ],
+      "returncode": 0,
+      "timed_out": false,
+      "wall_time_s": 0.9750215029343963,
+      "peak_gpu_memory_bytes": 66865664,
+      "gpu_process_observed": false,
+      "memory_sampler_status": "ok:nvidia-smi",
+      "gpu_evidence_source": "cupy-pool",
+      "backend_evidence": {
+        "backend": "cupy",
+        "cupy_version": "14.1.1",
+        "device_id": 0,
+        "device_name": "NVIDIA H200 NVL MIG 1g.18gb",
+        "pool_reserved_bytes": 66865664,
+        "pool_used_bytes": 36027392
+      },
+      "precision_pass": true,
+      "accuracy_pass": true,
+      "accuracy": 0.9835,
+      "accuracy_min": 0.98,
+      "max_abs_diff": 1.52587890625e-05,
+      "rtol": 0.001,
+      "atol": 0.001,
+      "output_contract_pass": true,
+      "gpu_evidence_pass": true,
+      "passed": true,
+      "errors": [],
+      "stdout_tail": "",
+      "stderr_tail": "C3.5 Model Deployment\n  ONNX model:  /home/mig06/Hackathon/.specification/testcases/release_to_competitors/models/mlp_v1.onnx\n  Input dir:   /home/mig06/Hackathon/.specification/testcases/release_to_competitors/testdata/c35/mlp_v1/input\n  Output dir:  /tmp/c35-standard-mlp-pua3z3l_/output\n  Batch size:  256\n\nInference complete:\n  Samples:     10000\n  Output shape:[10000, 10]\n  Parse time:  0.017s\n  Infer time:  0.170s\n  Total time:  0.396s\n  Backend:     connected C3 cupy on AEC H200\n  Fusion:      6 -> 6 nodes\n  C3.4 plan:   6 kernels, 13 allocations\nC35_GPU_EVIDENCE_JSON={\"backend\": \"cupy\", \"cupy_version\": \"14.1.1\", \"device_id\": 0, \"device_name\": \"NVIDIA H200 NVL MIG 1g.18gb\", \"pool_reserved_bytes\": 66865664, \"pool_used_bytes\": 36027392}\n"
+    },
+    {
+      "model": "resnet",
+      "command": [
+        "python3",
+        "-m",
+        "c35.deploy",
+        "--onnx",
+        "/home/mig06/Hackathon/.specification/testcases/release_to_competitors/models/resnet_v1.onnx",
+        "--input",
+        "/home/mig06/Hackathon/.specification/testcases/release_to_competitors/testdata/c35/resnet_v1/input",
+        "--output",
+        "/tmp/c35-standard-resnet-uichffg6/output",
+        "--batch-size",
+        "256"
+      ],
+      "returncode": 0,
+      "timed_out": false,
+      "wall_time_s": 8.48320101480931,
+      "peak_gpu_memory_bytes": 15241699328,
+      "gpu_process_observed": false,
+      "memory_sampler_status": "ok:nvidia-smi",
+      "gpu_evidence_source": "cupy-pool",
+      "backend_evidence": {
+        "backend": "cupy",
+        "cupy_version": "14.1.1",
+        "device_id": 0,
+        "device_name": "NVIDIA H200 NVL MIG 1g.18gb",
+        "pool_reserved_bytes": 15241699328,
+        "pool_used_bytes": 430286848
+      },
+      "precision_pass": true,
+      "accuracy_pass": true,
+      "accuracy": 0.9351,
+      "accuracy_min": 0.85,
+      "max_abs_diff": 8.58306884765625e-06,
+      "rtol": 0.001,
+      "atol": 0.001,
+      "output_contract_pass": true,
+      "gpu_evidence_pass": true,
+      "passed": true,
+      "errors": [],
+      "stdout_tail": "",
+      "stderr_tail": "C3.5 Model Deployment\n  ONNX model:  /home/mig06/Hackathon/.specification/testcases/release_to_competitors/models/resnet_v1.onnx\n  Input dir:   /home/mig06/Hackathon/.specification/testcases/release_to_competitors/testdata/c35/resnet_v1/input\n  Output dir:  /tmp/c35-standard-resnet-uichffg6/output\n  Batch size:  256\n\nInference complete:\n  Samples:     10000\n  Output shape:[10000, 10]\n  Parse time:  0.349s\n  Infer time:  7.111s\n  Total time:  7.880s\n  Backend:     connected C3 cupy on AEC H200\n  Fusion:      48 -> 40 nodes\n  C3.4 plan:   40 kernels, 83 allocations\nC35_GPU_EVIDENCE_JSON={\"backend\": \"cupy\", \"cupy_version\": \"14.1.1\", \"device_id\": 0, \"device_name\": \"NVIDIA H200 NVL MIG 1g.18gb\", \"pool_reserved_bytes\": 15241699328, \"pool_used_bytes\": 430286848}\n"
+    },
+    {
+      "model": "transformer",
+      "command": [
+        "python3",
+        "-m",
+        "c35.deploy",
+        "--onnx",
+        "/home/mig06/Hackathon/.specification/testcases/release_to_competitors/models/transformer_v1.onnx",
+        "--input",
+        "/home/mig06/Hackathon/.specification/testcases/release_to_competitors/testdata/c35/transformer_v1/input",
+        "--output",
+        "/tmp/c35-standard-transformer-3q78lx1x/output",
+        "--batch-size",
+        "256"
+      ],
+      "returncode": 1,
+      "timed_out": false,
+      "wall_time_s": 0.7693840935826302,
+      "peak_gpu_memory_bytes": null,
+      "gpu_process_observed": false,
+      "memory_sampler_status": "ok:nvidia-smi",
+      "gpu_evidence_source": null,
+      "backend_evidence": {},
+      "precision_pass": false,
+      "accuracy_pass": null,
+      "accuracy": null,
+      "accuracy_min": null,
+      "max_abs_diff": null,
+      "rtol": null,
+      "atol": null,
+      "output_contract_pass": false,
+      "gpu_evidence_pass": false,
+      "passed": false,
+      "errors": [
+        "Command exited with status 1"
+      ],
+      "stdout_tail": "",
+      "stderr_tail": "C3.5 Model Deployment\n  ONNX model:  /home/mig06/Hackathon/.specification/testcases/release_to_competitors/models/transformer_v1.onnx\n  Input dir:   /home/mig06/Hackathon/.specification/testcases/release_to_competitors/testdata/c35/transformer_v1/input\n  Output dir:  /tmp/c35-standard-transformer-3q78lx1x/output\n  Batch size:  256\n\nError during inference: Tensor 'input_ids' requires 36864 bytes, planned capacity is 18432\nTraceback (most recent call last):\n  File \"/home/mig06/Hackathon/c35/deploy.py\", line 101, in main\n    info = load_and_infer(\n           ^^^^^^^^^^^^^^^\n  File \"/home/mig06/Hackathon/c35/executor.py\", line 960, in load_and_infer\n    batch_outputs = executor.run(batch_feed)\n                    ^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/mig06/Hackathon/c35/executor.py\", line 769, in run\n    optimized = self.optimized_executor.run_planned(feed_dict, plan)\n                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/mig06/Hackathon/c35/executor.py\", line 663, in run_planned\n    destination = self._allocation_view(\n                  ^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/mig06/Hackathon/c35/executor.py\", line 453, in _allocation_view\n    raise ValueError(\nValueError: Tensor 'input_ids' requires 36864 bytes, planned capacity is 18432\n"
+    }
+  ]
+}

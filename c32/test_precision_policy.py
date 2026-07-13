@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
 from c31.import_onnx import import_onnx
 from c32.hardware import HardwareCapability
@@ -12,8 +13,12 @@ from c32.strategy import ExecutionMode, SENSITIVE_OPS, Strategy
 class PrecisionPolicyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
+        models = (
+            Path(__file__).resolve().parents[1] / ".specification" / "testcases"
+            / "release_to_competitors" / "models"
+        )
         cls.graphs = [
-            import_onnx(f"models/{name}_v1.onnx")
+            import_onnx(str(models / f"{name}_v1.onnx"))
             for name in ("mlp", "resnet", "transformer")
         ]
 

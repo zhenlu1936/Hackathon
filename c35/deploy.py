@@ -15,7 +15,6 @@ import argparse
 import json
 import os
 import sys
-import time
 
 import cupy as cp
 
@@ -92,6 +91,22 @@ def main() -> None:
     print(f"  Output dir:  {output_dir}", file=sys.stderr)
     if batch_size is not None:
         print(f"  Batch size:  {batch_size}", file=sys.stderr)
+
+    # Activate verified hardware snapshot from the actual AEC target device.
+    # This replaces the unverified static default with a real CuPy device
+    # query so that capability routing is constrained to discovered features.
+    from c32.api import activate_cupy_hardware, hardware
+    activated = activate_cupy_hardware()
+    print(
+        f"  Hardware:    {activated.name} "
+        f"(verified={activated.verified}, source={activated.source})",
+        file=sys.stderr,
+    )
+    print(
+        f"  Precisions:  {activated.supported_precisions()}",
+        file=sys.stderr,
+    )
+
     print(file=sys.stderr)
 
     # Run inference

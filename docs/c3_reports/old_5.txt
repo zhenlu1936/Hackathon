@@ -1,0 +1,26 @@
+2026-07-13T11:27:20+00:00
+cupy 14.1.1
+onnx 1.22.0
+protobuf 7.35.1
+device b'NVIDIA H200 NVL MIG 1g.18gb'
+test_conv_strategy_uses_semantic_guards_and_infers_kernel_shape (c32.test_contract.C32ContractTests.test_conv_strategy_uses_semantic_guards_and_infers_kernel_shape) ... ok
+test_hopper_properties_are_queried_conservatively (c32.test_contract.C32ContractTests.test_hopper_properties_are_queried_conservatively) ... ok
+test_layernorm_three_outputs_form_a_connected_sequence (c32.test_contract.C32ContractTests.test_layernorm_three_outputs_form_a_connected_sequence) ... ok
+test_linear_alias_emits_a_recognizable_matmul (c32.test_contract.C32ContractTests.test_linear_alias_emits_a_recognizable_matmul) ... ok
+test_process_graph_rebuilds_missing_topological_order (c32.test_contract.C32ContractTests.test_process_graph_rebuilds_missing_topological_order) ... ok
+test_sensitive_low_precision_and_disconnected_plans_are_rejected (c32.test_contract.C32ContractTests.test_sensitive_low_precision_and_disconnected_plans_are_rejected) ... ok
+test_tuning_enforces_all_declared_limits (c32.test_contract.C32ContractTests.test_tuning_enforces_all_declared_limits) ... ok
+test_im2col_contract_reshape_and_bias_match_nchw_convolution (c32.test_kernel_registry.KernelRegistryTests.test_im2col_contract_reshape_and_bias_match_nchw_convolution) ... ok
+test_nhwo_contract_is_transposed_to_nchw (c32.test_kernel_registry.KernelRegistryTests.test_nhwo_contract_is_transposed_to_nchw) ... ok
+test_unsupported_kernel_fails_closed (c32.test_kernel_registry.KernelRegistryTests.test_unsupported_kernel_fails_closed) ... ok
+
+----------------------------------------------------------------------
+Ran 10 tests in 0.027s
+
+OK
+test_resnet_batch_64 (c35.test_c35.C35SpecificationTests.test_resnet_batch_64) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 9.182s
+
+OK

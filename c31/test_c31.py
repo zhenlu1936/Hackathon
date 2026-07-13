@@ -13,11 +13,12 @@ import onnx
 from onnx import TensorProto, helper
 
 from c31.import_onnx import import_onnx
-from c3common.ir.graph import Graph, Node
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MODELS = ROOT / "models"
+MODELS = (
+    ROOT / ".specification" / "testcases" / "release_to_competitors" / "models"
+)
 
 
 class C31SpecificationTests(unittest.TestCase):

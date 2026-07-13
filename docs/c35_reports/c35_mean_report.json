@@ -1,0 +1,412 @@
+{
+  "format_version": "c35-mean-1.0",
+  "aggregation": {
+    "method": "arithmetic mean",
+    "run_count": 3,
+    "source_reports": [
+      "c35-mean-source-1.json",
+      "c35-mean-source-2.json",
+      "c35-mean-source-3.json"
+    ]
+  },
+  "batch_size": 256,
+  "device": {
+    "name": "NVIDIA H200 NVL MIG 1g.18gb",
+    "cupy_version": "14.1.1",
+    "cuda_runtime_version": 13020,
+    "device_id": 0
+  },
+  "all_passed": true,
+  "results": [
+    {
+      "model": "mlp",
+      "run_count": 3,
+      "runs_passed": 3,
+      "all_passed": true,
+      "mean": {
+        "accuracy": 0.9834999999999999,
+        "batch_count": 40.0,
+        "fusion_nodes_after": 3.0,
+        "fusion_nodes_before": 6.0,
+        "infer_time_s": 0.06133333333333333,
+        "max_abs_diff": 1.9073486328125e-05,
+        "max_plan_arena_bytes": 2136640.0,
+        "parse_time_s": 0.015333333333333332,
+        "peak_gpu_memory_bytes": 35278336.0,
+        "plan_allocations": 10.0,
+        "plan_kernels": 3.0,
+        "pool_reserved_bytes": 35278336.0,
+        "pool_reserved_bytes_after_last_batch": 35175424.0,
+        "pool_reserved_bytes_before_first_batch": 33497088.0,
+        "pool_used_bytes": 34913280.0,
+        "runtime_event_objects": 16.0,
+        "runtime_stream_objects": 2.0,
+        "samples": 10000.0,
+        "total_time_s": 0.24166666666666667,
+        "wall_time_s": 0.7997396274780234
+      },
+      "source_values": {
+        "accuracy": [
+          0.9835,
+          0.9835,
+          0.9835
+        ],
+        "batch_count": [
+          40.0,
+          40.0,
+          40.0
+        ],
+        "fusion_nodes_after": [
+          3.0,
+          3.0,
+          3.0
+        ],
+        "fusion_nodes_before": [
+          6.0,
+          6.0,
+          6.0
+        ],
+        "infer_time_s": [
+          0.064,
+          0.064,
+          0.056
+        ],
+        "max_abs_diff": [
+          1.9073486328125e-05,
+          1.9073486328125e-05,
+          1.9073486328125e-05
+        ],
+        "max_plan_arena_bytes": [
+          2136640.0,
+          2136640.0,
+          2136640.0
+        ],
+        "parse_time_s": [
+          0.017,
+          0.017,
+          0.012
+        ],
+        "peak_gpu_memory_bytes": [
+          35278336.0,
+          35278336.0,
+          35278336.0
+        ],
+        "plan_allocations": [
+          10.0,
+          10.0,
+          10.0
+        ],
+        "plan_kernels": [
+          3.0,
+          3.0,
+          3.0
+        ],
+        "pool_reserved_bytes": [
+          35278336.0,
+          35278336.0,
+          35278336.0
+        ],
+        "pool_reserved_bytes_after_last_batch": [
+          35175424.0,
+          35175424.0,
+          35175424.0
+        ],
+        "pool_reserved_bytes_before_first_batch": [
+          33497088.0,
+          33497088.0,
+          33497088.0
+        ],
+        "pool_used_bytes": [
+          34913280.0,
+          34913280.0,
+          34913280.0
+        ],
+        "runtime_event_objects": [
+          16.0,
+          16.0,
+          16.0
+        ],
+        "runtime_stream_objects": [
+          2.0,
+          2.0,
+          2.0
+        ],
+        "samples": [
+          10000.0,
+          10000.0,
+          10000.0
+        ],
+        "total_time_s": [
+          0.252,
+          0.257,
+          0.216
+        ],
+        "wall_time_s": [
+          0.8170836782082915,
+          0.8177284756675363,
+          0.7644067285582423
+        ]
+      }
+    },
+    {
+      "model": "resnet",
+      "run_count": 3,
+      "runs_passed": 3,
+      "all_passed": true,
+      "mean": {
+        "accuracy": 0.9350999999999999,
+        "batch_count": 40.0,
+        "fusion_nodes_after": 22.0,
+        "fusion_nodes_before": 48.0,
+        "infer_time_s": 6.733333333333333,
+        "max_abs_diff": 1.52587890625e-05,
+        "max_plan_arena_bytes": 1418311232.0,
+        "parse_time_s": 0.31066666666666665,
+        "peak_gpu_memory_bytes": 3358545408.0,
+        "plan_allocations": 142.0,
+        "plan_kernels": 99.0,
+        "pool_reserved_bytes": 3358545408.0,
+        "pool_reserved_bytes_after_last_batch": 3358442496.0,
+        "pool_reserved_bytes_before_first_batch": 1541191680.0,
+        "pool_used_bytes": 2352974848.0,
+        "runtime_event_objects": 124.0,
+        "runtime_stream_objects": 3.0,
+        "samples": 10000.0,
+        "total_time_s": 7.398666666666667,
+        "wall_time_s": 8.00516798067838
+      },
+      "source_values": {
+        "accuracy": [
+          0.9351,
+          0.9351,
+          0.9351
+        ],
+        "batch_count": [
+          40.0,
+          40.0,
+          40.0
+        ],
+        "fusion_nodes_after": [
+          22.0,
+          22.0,
+          22.0
+        ],
+        "fusion_nodes_before": [
+          48.0,
+          48.0,
+          48.0
+        ],
+        "infer_time_s": [
+          6.708,
+          6.763,
+          6.729
+        ],
+        "max_abs_diff": [
+          1.52587890625e-05,
+          1.52587890625e-05,
+          1.52587890625e-05
+        ],
+        "max_plan_arena_bytes": [
+          1418311232.0,
+          1418311232.0,
+          1418311232.0
+        ],
+        "parse_time_s": [
+          0.282,
+          0.325,
+          0.325
+        ],
+        "peak_gpu_memory_bytes": [
+          3358545408.0,
+          3358545408.0,
+          3358545408.0
+        ],
+        "plan_allocations": [
+          142.0,
+          142.0,
+          142.0
+        ],
+        "plan_kernels": [
+          99.0,
+          99.0,
+          99.0
+        ],
+        "pool_reserved_bytes": [
+          3358545408.0,
+          3358545408.0,
+          3358545408.0
+        ],
+        "pool_reserved_bytes_after_last_batch": [
+          3358442496.0,
+          3358442496.0,
+          3358442496.0
+        ],
+        "pool_reserved_bytes_before_first_batch": [
+          1541191680.0,
+          1541191680.0,
+          1541191680.0
+        ],
+        "pool_used_bytes": [
+          2352974848.0,
+          2352974848.0,
+          2352974848.0
+        ],
+        "runtime_event_objects": [
+          124.0,
+          124.0,
+          124.0
+        ],
+        "runtime_stream_objects": [
+          3.0,
+          3.0,
+          3.0
+        ],
+        "samples": [
+          10000.0,
+          10000.0,
+          10000.0
+        ],
+        "total_time_s": [
+          7.307,
+          7.457,
+          7.432
+        ],
+        "wall_time_s": [
+          7.915989543311298,
+          8.063360444270074,
+          8.036153954453766
+        ]
+      }
+    },
+    {
+      "model": "transformer",
+      "run_count": 3,
+      "runs_passed": 3,
+      "all_passed": true,
+      "mean": {
+        "accuracy": null,
+        "batch_count": 40.0,
+        "fusion_nodes_after": 115.0,
+        "fusion_nodes_before": 165.0,
+        "infer_time_s": 1.195,
+        "max_abs_diff": 3.3974647521972656e-05,
+        "max_plan_arena_bytes": 29189760.0,
+        "parse_time_s": 0.034333333333333334,
+        "peak_gpu_memory_bytes": 66970112.0,
+        "plan_allocations": 179.0,
+        "plan_kernels": 115.0,
+        "pool_reserved_bytes": 66970112.0,
+        "pool_reserved_bytes_after_last_batch": 64410112.0,
+        "pool_reserved_bytes_before_first_batch": 30630400.0,
+        "pool_used_bytes": 45535744.0,
+        "runtime_event_objects": 336.0,
+        "runtime_stream_objects": 5.0,
+        "samples": 10000.0,
+        "total_time_s": 1.4343333333333332,
+        "wall_time_s": 2.0062082847580314
+      },
+      "source_values": {
+        "accuracy": [
+          null,
+          null,
+          null
+        ],
+        "batch_count": [
+          40.0,
+          40.0,
+          40.0
+        ],
+        "fusion_nodes_after": [
+          115.0,
+          115.0,
+          115.0
+        ],
+        "fusion_nodes_before": [
+          165.0,
+          165.0,
+          165.0
+        ],
+        "infer_time_s": [
+          1.188,
+          1.167,
+          1.23
+        ],
+        "max_abs_diff": [
+          3.3974647521972656e-05,
+          3.3974647521972656e-05,
+          3.3974647521972656e-05
+        ],
+        "max_plan_arena_bytes": [
+          29189760.0,
+          29189760.0,
+          29189760.0
+        ],
+        "parse_time_s": [
+          0.035,
+          0.034,
+          0.034
+        ],
+        "peak_gpu_memory_bytes": [
+          66970112.0,
+          66970112.0,
+          66970112.0
+        ],
+        "plan_allocations": [
+          179.0,
+          179.0,
+          179.0
+        ],
+        "plan_kernels": [
+          115.0,
+          115.0,
+          115.0
+        ],
+        "pool_reserved_bytes": [
+          66970112.0,
+          66970112.0,
+          66970112.0
+        ],
+        "pool_reserved_bytes_after_last_batch": [
+          64410112.0,
+          64410112.0,
+          64410112.0
+        ],
+        "pool_reserved_bytes_before_first_batch": [
+          30630400.0,
+          30630400.0,
+          30630400.0
+        ],
+        "pool_used_bytes": [
+          45535744.0,
+          45535744.0,
+          45535744.0
+        ],
+        "runtime_event_objects": [
+          336.0,
+          336.0,
+          336.0
+        ],
+        "runtime_stream_objects": [
+          5.0,
+          5.0,
+          5.0
+        ],
+        "samples": [
+          10000.0,
+          10000.0,
+          10000.0
+        ],
+        "total_time_s": [
+          1.436,
+          1.399,
+          1.468
+        ],
+        "wall_time_s": [
+          2.0244999593123794,
+          1.9725645296275616,
+          2.021560365334153
+        ]
+      }
+    }
+  ]
+}

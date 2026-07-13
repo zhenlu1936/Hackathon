@@ -18,6 +18,7 @@ Usage:
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from c3common.ir.graph import Graph
@@ -25,9 +26,9 @@ from c32.kernel_spec import KernelSpecRef
 from c32.strategy import Strategy, ExecutionMode
 from c34.execution_plan import (
     Allocation, Transfer, KernelStep, EventDep,
-    LifetimeInterval, ExecutionPlan, PoolStats,
+    LifetimeInterval, ExecutionPlan, TimelineStep,
 )
-from c34.lifetime import compute_lifetimes, find_overlap_groups
+from c34.lifetime import compute_lifetimes
 from c34.memory_pool import DeviceMemoryPool, FitPolicy
 
 
@@ -83,6 +84,9 @@ class ExecutionScheduler:
         self._kernel_schedule: List[KernelSpecRef] = []
         # Map kernel index -> originating node_id
         self._kernel_node_map: Dict[int, str] = {}
+        self._node_decompositions: Dict[str, List[str]] = {}
+        self._node_precisions: Dict[str, Dict[str, Optional[str]]] = {}
+        self._timeline: List[TimelineStep] = []
 
     # ── Main entry ─────────────────────────────────────────────────
 
@@ -119,7 +123,16 @@ class ExecutionScheduler:
         # Step 6: Schedule D2H transfers for graph outputs
         self._schedule_output_readback(lifetimes)
 
-        # Step 7: Build the final plan
+        # Reuse dependencies protect aliased arena ranges across streams, and
+        # output events order D2H behind the producing compute stream.
+        self._add_reuse_dependencies(lifetimes)
+        self._add_output_dependencies()
+
+        # Step 7: Interleave allocation, transfer, compute, synchronization,
+        # readback, and logical free operations in one executable timeline.
+        self._build_timeline(lifetimes)
+
+        # Step 8: Build the final plan
         plan = ExecutionPlan(
             model_name=self.graph.name,
             batch_size=self.batch_size,
@@ -127,6 +140,7 @@ class ExecutionScheduler:
             transfers=self._transfers,
             kernel_steps=self._kernel_steps,
             events=self._events,
+            timeline=self._timeline,
             lifetimes=lifetimes,
             pool_stats=self._pool.stats(),
             weight_slots=self._weight_slots,
@@ -141,6 +155,9 @@ class ExecutionScheduler:
     def _build_kernel_schedule(self) -> None:
         """Decompose every node and build a flat kernel execution schedule.
 
+        Emits one entry per C3.2 sub-kernel so that every emitted kernel name
+        resolves to submitted source and drives the H200 runtime directly.
+
         Also registers intermediate tensors in the graph's tensor table
         with inferred shapes/sizes so that lifetime analysis can compute
         correct byte sizes.
@@ -154,15 +171,32 @@ class ExecutionScheduler:
                 continue
 
             precision = self._strategy.select_precision(node, self.graph)
-            kernels = self._strategy.decompose(node, self.graph, precision)
+            decomposition = self._strategy.decompose(node, self.graph, precision)
+            self._node_decompositions[nid] = [
+                kernel.kernel_name for kernel in decomposition
+            ]
+            self._node_precisions[nid] = {
+                "compute_dtype": precision.compute_dtype,
+                "accumulator_dtype": precision.accumulator_dtype,
+                "input_dtype": precision.input_dtype,
+                "weight_dtype": precision.weight_dtype,
+                "output_dtype": precision.output_dtype,
+            }
 
-            for krn in kernels:
+            # Emit one KernelSpecRef per C3.2 sub-kernel so that every
+            # emitted kernel name drives the H200 runtime directly.
+            for krn in decomposition:
+                # Register intermediate tensors in the graph's tensor table
+                # so that lifetime analysis can compute correct byte sizes.
+                self._register_intermediate_tensors(node, krn)
+                krn.tuning_params = self._strategy.tune_kernel(krn, precision)
+                krn.precision_profile = precision
+                # Inject batch size for kernels that need spatial reshaping.
+                if "_batch_size" not in krn.operator_params:
+                    krn.operator_params["_batch_size"] = self.batch_size
                 idx = len(self._kernel_schedule)
                 self._kernel_schedule.append(krn)
                 self._kernel_node_map[idx] = nid
-
-                # Register intermediate tensor shapes for lifetime sizing
-                self._register_intermediate_tensors(node, krn)
 
     # ── Intermediate tensor registration ───────────────────────────
 
@@ -207,7 +241,10 @@ class ExecutionScheduler:
     ) -> List[int]:
         """Infer output shape of a kernel step from its parent node's shapes.
 
-        Resolves symbolic batch dims using self.batch_size.
+        Resolves symbolic batch dims using self.batch_size.  When the exact
+        shape cannot be derived, returns the shape of the first input tensor
+        as a conservative over-estimate.  This ensures the allocated arena
+        slot is never smaller than the kernel result.
         """
         def _resolve(shape_list) -> List[int]:
             result = []
@@ -225,16 +262,20 @@ class ExecutionScheduler:
                         return []
             return result
 
-        # Try to get shape from parent node outputs first
-        for out_name in node.outputs:
-            out_t = self.graph.tensors.get(out_name)
-            if out_t is not None and out_t.shape:
-                resolved = _resolve(out_t.shape)
-                if resolved:
-                    return resolved
+        # Try to get shape from parent node outputs first, but only
+        # for kernel outputs that correspond to actual node outputs.
+        node_output_names = set(node.outputs)
+        krn_output_names = set(name for name in krn.outputs if name)
+        if krn_output_names & node_output_names:
+            for out_name in node.outputs:
+                out_t = self.graph.tensors.get(out_name)
+                if out_t is not None and out_t.shape:
+                    resolved = _resolve(out_t.shape)
+                    if resolved:
+                        return resolved
 
         # For matmul intermediates (e.g. fc1_matmul_out), infer from inputs
-        if krn.kernel_name.startswith("matmul_"):
+        if krn.kernel_name.startswith("matmul"):
             shapes = []
             for inp_name in krn.inputs:
                 inp_t = self.graph.tensors.get(inp_name)
@@ -244,6 +285,14 @@ class ExecutionScheduler:
                         shapes.append(resolved)
             if len(shapes) >= 2:
                 a, b = shapes[0], shapes[1]
+                lowering = krn.operator_params.get("lowering_kind", "")
+                if lowering == "conv_contract":
+                    # a: im2col (N*H_out*W_out, C*kH*kW)
+                    # b: weight (O, C_gin, kH, kW)
+                    # Output: (N*H_out*W_out, O)
+                    m = a[-2] if len(a) >= 2 else 1
+                    n = b[0] if len(b) >= 1 else 1
+                    return [m, n]
                 trans_b = node.attributes.get("transB", 0)
                 m = a[-2] if len(a) >= 2 else 1
                 n = b[-2] if trans_b else b[-1]
@@ -253,9 +302,44 @@ class ExecutionScheduler:
                     return a[:-2] + [m, n]
                 return [m, n]
 
+        # For im2col: output is (N * H_out * W_out, C * kH * kW).
+        if krn.kernel_name.startswith("im2col"):
+            for inp_name in krn.inputs:
+                inp_t = self.graph.tensors.get(inp_name)
+                if inp_t is not None and inp_t.shape:
+                    resolved = _resolve(inp_t.shape)
+                    if resolved and len(resolved) == 4:
+                        N, C, H, W_in = resolved
+                        kH = int(krn.operator_params.get("kernel_shape", [3, 3])[0])
+                        kW = int(krn.operator_params.get("kernel_shape", [3, 3])[-1]) \
+                            if len(krn.operator_params.get("kernel_shape", [3])) > 1 else kH
+                        sH = int(krn.operator_params.get("strides", [1, 1])[0])
+                        sW = int(krn.operator_params.get("strides", [1, 1])[-1]) \
+                            if len(krn.operator_params.get("strides", [1])) > 1 else sH
+                        dH = int(krn.operator_params.get("dilations", [1, 1])[0])
+                        dW = int(krn.operator_params.get("dilations", [1, 1])[-1]) \
+                            if len(krn.operator_params.get("dilations", [1])) > 1 else dH
+                        pads = krn.operator_params.get("pads", [0, 0, 0, 0])
+                        pHT, pWL, pHB, pWR = [int(p) for p in pads]
+                        H_out = (H + pHT + pHB - dH * (kH - 1) - 1) // sH + 1
+                        W_out = (W_in + pWL + pWR - dW * (kW - 1) - 1) // sW + 1
+                        if H_out > 0 and W_out > 0:
+                            # Output is (N * H_out * W_out, C * kH * kW)
+                            return [N * H_out * W_out, C * kH * kW]
+                    if resolved:
+                        # Fallback: im2col can expand the element count by
+                        # up to kH*kW.  Use a safe over-estimate.
+                        kH = int(krn.operator_params.get("kernel_shape", [3, 3])[0])
+                        kW = int(krn.operator_params.get("kernel_shape", [3, 3])[-1]) \
+                            if len(krn.operator_params.get("kernel_shape", [3])) > 1 else kH
+                        total = math.prod(resolved)
+                        return [total * kH * kW]
+
         # For elementwise ops, output shape = first input shape
-        if krn.kernel_name.startswith(("add_", "mul_", "div_", "sub_", "relu_",
-                                         "erf_", "sqrt", "exp", "reduce_")):
+        # Match both bare names (from decompositions) and precision-suffixed names.
+        if krn.kernel_name.startswith(("add", "mul", "div", "sub", "relu",
+                                         "erf", "sqrt", "exp", "reciprocal",
+                                         "reduce_")):
             for inp_name in krn.inputs:
                 inp_t = self.graph.tensors.get(inp_name)
                 if inp_t is not None and inp_t.shape:
@@ -275,6 +359,41 @@ class ExecutionScheduler:
                             prod *= d
                         return [resolved[0], prod]
 
+        # For winograd_forward: output shape ≈ input shape (N, O, H_out, W_out)
+        if krn.kernel_name.startswith("winograd"):
+            for inp_name in krn.inputs:
+                inp_t = self.graph.tensors.get(inp_name)
+                if inp_t is not None and inp_t.shape:
+                    resolved = _resolve(inp_t.shape)
+                    if resolved:
+                        return resolved
+
+        # For gather, reshape, transpose, split: output element count
+        # equals input element count (reshuffling), so use first input shape.
+        if krn.kernel_name in ("gather", "reshape", "transpose", "split",
+                               "flatten", "constant"):
+            for inp_name in krn.inputs:
+                inp_t = self.graph.tensors.get(inp_name)
+                if inp_t is not None and inp_t.shape:
+                    resolved = _resolve(inp_t.shape)
+                    if resolved:
+                        return resolved
+
+        # For fused kernels: try node output, then first input shape.
+        if krn.kernel_name.startswith("fused_"):
+            for out_name in node.outputs:
+                out_t = self.graph.tensors.get(out_name)
+                if out_t is not None and out_t.shape:
+                    resolved = _resolve(out_t.shape)
+                    if resolved:
+                        return resolved
+            for inp_name in krn.inputs:
+                inp_t = self.graph.tensors.get(inp_name)
+                if inp_t is not None and inp_t.shape:
+                    resolved = _resolve(inp_t.shape)
+                    if resolved:
+                        return resolved
+
         # Default: try parent node output shape
         for out_name in node.outputs:
             out_t = self.graph.tensors.get(out_name)
@@ -283,9 +402,41 @@ class ExecutionScheduler:
                 if resolved:
                     return resolved
 
+        # Conservative fallback: use first input shape.
+        # This over-estimates but prevents undersized allocations.
+        for inp_name in krn.inputs:
+            inp_t = self.graph.tensors.get(inp_name)
+            if inp_t is not None and inp_t.shape:
+                resolved = _resolve(inp_t.shape)
+                if resolved:
+                    return resolved
+
         return []
 
     # ── Step 3: Weight allocation (Feature A) ──────────────────────
+
+    def _allocation(
+        self,
+        *,
+        alloc_id: str,
+        tensor_name: str,
+        slot_id: int,
+        size_bytes: int,
+        is_weight: bool = False,
+        is_output: bool = False,
+    ) -> Allocation:
+        """Create an allocation with its concrete arena range attached."""
+        offset_bytes, capacity_bytes = self._pool.describe(slot_id)
+        return Allocation(
+            alloc_id=alloc_id,
+            tensor_name=tensor_name,
+            slot_id=slot_id,
+            size_bytes=size_bytes,
+            is_weight=is_weight,
+            is_output=is_output,
+            offset_bytes=offset_bytes,
+            capacity_bytes=capacity_bytes,
+        )
 
     def _allocate_weights(self, lifetimes: Dict[str, LifetimeInterval]) -> None:
         """Allocate device slots for all weights/initializers and create H2D transfers.
@@ -294,7 +445,8 @@ class ExecutionScheduler:
         Each H2D transfer is assigned a ``weight_ready`` event so that
         kernels know when the data is on-device.
         """
-        for tname, interval in lifetimes.items():
+        for tname in sorted(lifetimes):
+            interval = lifetimes[tname]
             if not interval.is_weight:
                 continue
             if interval.size_bytes <= 0:
@@ -304,12 +456,12 @@ class ExecutionScheduler:
             slot_id = self._pool.alloc(interval.size_bytes)
             alloc_id = f"alloc_w_{tname}"
 
-            alloc = Allocation(
+            alloc = self._allocation(
                 alloc_id=alloc_id,
                 tensor_name=tname,
                 slot_id=slot_id,
                 size_bytes=interval.size_bytes,
-                is_weight=True,
+                is_weight=tname in self.graph.initializers,
             )
             self._allocations.append(alloc)
             self._weight_slots[tname] = alloc_id
@@ -341,13 +493,14 @@ class ExecutionScheduler:
 
     def _allocate_inputs(self, lifetimes: Dict[str, LifetimeInterval]) -> None:
         """Allocate graph inputs and create the H2D dependency they require."""
-        for tname, interval in lifetimes.items():
+        for tname in sorted(lifetimes):
+            interval = lifetimes[tname]
             if not interval.is_input or interval.size_bytes <= 0:
                 continue
 
             slot_id = self._pool.alloc(interval.size_bytes)
             alloc_id = f"alloc_in_{tname}"
-            self._allocations.append(Allocation(
+            self._allocations.append(self._allocation(
                 alloc_id=alloc_id,
                 tensor_name=tname,
                 slot_id=slot_id,
@@ -398,7 +551,8 @@ class ExecutionScheduler:
         # Track which tensors to free after each step (pool-level only)
         free_after: Dict[int, List[str]] = {}
         for li in intermediates:
-            free_after.setdefault(li.last_use, []).append(li.tensor_name)
+            if not li.is_output:
+                free_after.setdefault(li.last_use, []).append(li.tensor_name)
 
         # Track which tensors to alloc before each step
         alloc_before: Dict[int, List[LifetimeInterval]] = {}
@@ -419,11 +573,12 @@ class ExecutionScheduler:
                     if len(alloc_id) > 64:
                         alloc_id = f"alloc_inter_{slot_id}_{len(self._allocations)}"
 
-                    alloc = Allocation(
+                    alloc = self._allocation(
                         alloc_id=alloc_id,
                         tensor_name=li.tensor_name,
                         slot_id=slot_id,
                         size_bytes=li.size_bytes,
+                        is_output=li.is_output,
                     )
                     self._allocations.append(alloc)
                     # Keep in _alloc_map for kernel binding lookups
@@ -459,9 +614,9 @@ class ExecutionScheduler:
         stream_assignments = self._assign_streams() if self.enable_multi_stream else {}
 
         # ── Weight-ready events (Feature D) ──
-        weight_events: Dict[str, str] = {}  # weight_tensor_name -> event_id
-        if self.enable_prefetch:
-            weight_events = self._create_weight_events()
+        # Readiness is required for correctness whether transfers are staged
+        # (prefetch enabled) or submitted eagerly.
+        weight_events: Dict[str, str] = self._create_weight_events()
         input_events = {
             t.tensor_name: t.event_id for t in self._transfers
             if t.kind == "H2D" and t.tensor_name not in self._weight_slots
@@ -488,10 +643,9 @@ class ExecutionScheduler:
             depends_on: List[str] = []
 
             # Weight dependencies (Feature D)
-            if self.enable_prefetch:
-                for inp in krn.inputs:
-                    if inp in weight_events:
-                        depends_on.append(weight_events[inp])
+            for inp in krn.inputs:
+                if inp in weight_events:
+                    depends_on.append(weight_events[inp])
             for inp in krn.inputs:
                 if inp in input_events:
                     depends_on.append(input_events[inp])
@@ -501,12 +655,7 @@ class ExecutionScheduler:
                 cross_events = self._cross_stream_deps(step_idx, stream_assignments)
                 depends_on.extend(cross_events)
 
-            # Signals: this kernel signals weight-ready events for downstream uses
             signals: List[str] = []
-            if self.enable_prefetch:
-                for out in krn.outputs:
-                    if out in weight_events:
-                        signals.append(weight_events[out])
 
             # Tuning params
             tuning = None
@@ -530,6 +679,9 @@ class ExecutionScheduler:
                 depends_on=depends_on,
                 signals=signals,
                 tuning_params=tuning,
+                operator_params=dict(krn.operator_params),
+                precision_profile=dict(self._node_precisions[node_id]),
+                lowered_kernels=list(self._node_decompositions.get(node_id, [])),
             )
             self._kernel_steps.append(ks)
             self._step_counter += 1
@@ -548,7 +700,7 @@ class ExecutionScheduler:
                     continue
                 slot_id = self._pool.alloc(size)
                 alloc_id = f"alloc_out_{tname}"
-                alloc = Allocation(
+                alloc = self._allocation(
                     alloc_id=alloc_id,
                     tensor_name=tname,
                     slot_id=slot_id,
@@ -725,10 +877,262 @@ class ExecutionScheduler:
                             )
                             self._events.append(evt)
                             self._event_counter += 1
+                        if prev_step < len(self._kernel_steps):
+                            producer = self._kernel_steps[prev_step]
+                            if evt_id not in producer.signals:
+                                producer.signals.append(evt_id)
                         deps.append(evt_id)
                     break
 
         return deps
+
+    # ── Physical reuse and readback ordering ───────────────────────
+
+    @staticmethod
+    def _ranges_overlap(left: Allocation, right: Allocation) -> bool:
+        left_capacity = left.capacity_bytes or left.size_bytes
+        right_capacity = right.capacity_bytes or right.size_bytes
+        return (
+            left.offset_bytes < right.offset_bytes + right_capacity
+            and right.offset_bytes < left.offset_bytes + left_capacity
+        )
+
+    def _add_event(
+        self,
+        event_id: str,
+        src_stream: int,
+        dst_stream: int,
+        description: str,
+    ) -> None:
+        if event_id not in {event.event_id for event in self._events}:
+            self._events.append(EventDep(
+                event_id=event_id,
+                src_stream=src_stream,
+                dst_stream=dst_stream,
+                description=description,
+            ))
+
+    def _add_reuse_dependencies(
+        self, lifetimes: Dict[str, LifetimeInterval]
+    ) -> None:
+        """Order cross-stream users of overlapping physical arena ranges.
+
+        Dataflow events do not protect two unrelated tensors that reuse the
+        same bytes.  This adds a happens-before edge from the old tensor's last
+        user to the new tensor's first producer whenever those steps run on
+        different streams.
+        """
+        for current in self._allocations:
+            current_lifetime = lifetimes.get(current.tensor_name)
+            if current_lifetime is None or current_lifetime.is_weight:
+                continue
+            predecessors: List[Tuple[int, Allocation, LifetimeInterval]] = []
+            for previous in self._allocations:
+                if previous.alloc_id == current.alloc_id:
+                    continue
+                previous_lifetime = lifetimes.get(previous.tensor_name)
+                if previous_lifetime is None:
+                    continue
+                if not self._ranges_overlap(previous, current):
+                    continue
+                if previous_lifetime.last_use < current_lifetime.first_use:
+                    predecessors.append((
+                        previous_lifetime.last_use,
+                        previous,
+                        previous_lifetime,
+                    ))
+            if not predecessors:
+                continue
+            _, previous, previous_lifetime = max(
+                predecessors, key=lambda item: item[0]
+            )
+            source_index = previous_lifetime.last_use
+            target_index = current_lifetime.first_use
+            if not (
+                0 <= source_index < len(self._kernel_steps)
+                and 0 <= target_index < len(self._kernel_steps)
+            ):
+                continue
+            source = self._kernel_steps[source_index]
+            target = self._kernel_steps[target_index]
+            if source.stream_id == target.stream_id:
+                continue
+            event_id = (
+                f"evt_reuse_{source_index}_{target_index}_"
+                f"{previous.slot_id}_{current.slot_id}"
+            )
+            self._add_event(
+                event_id,
+                source.stream_id,
+                target.stream_id,
+                f"Arena reuse: {previous.tensor_name} -> {current.tensor_name}",
+            )
+            if event_id not in source.signals:
+                source.signals.append(event_id)
+            if event_id not in target.depends_on:
+                target.depends_on.append(event_id)
+
+    def _add_output_dependencies(self) -> None:
+        """Make every D2H transfer wait for its output-producing stream."""
+        for transfer in self._transfers:
+            if transfer.kind != "D2H":
+                continue
+            producer_index = None
+            for index, kernel in enumerate(self._kernel_steps):
+                if transfer.tensor_name in kernel.logical_outputs:
+                    producer_index = index
+            if producer_index is None:
+                continue
+            producer = self._kernel_steps[producer_index]
+            event_id = f"evt_output_ready_{transfer.tensor_name}"
+            self._add_event(
+                event_id,
+                producer.stream_id,
+                transfer.stream_id,
+                f"Output ready: {transfer.tensor_name}",
+            )
+            if event_id not in producer.signals:
+                producer.signals.append(event_id)
+            if event_id not in transfer.depends_on:
+                transfer.depends_on.append(event_id)
+
+    # ── Unified executable timeline ────────────────────────────────
+
+    def _build_timeline(
+        self, lifetimes: Dict[str, LifetimeInterval]
+    ) -> None:
+        """Interleave staged transfers and compute in host submission order."""
+        actions: List[TimelineStep] = []
+
+        def append(kind: str, *, stream_id: int = 0,
+                   ref_index: Optional[int] = None,
+                   alloc_id: Optional[str] = None,
+                   event_id: Optional[str] = None,
+                   tensor_name: Optional[str] = None) -> None:
+            actions.append(TimelineStep(
+                step_index=len(actions),
+                kind=kind,
+                stream_id=stream_id,
+                ref_index=ref_index,
+                alloc_id=alloc_id,
+                event_id=event_id,
+                tensor_name=tensor_name,
+            ))
+
+        alloc_by_tensor = {
+            allocation.tensor_name: allocation
+            for allocation in self._allocations
+        }
+        h2d_at: Dict[int, List[int]] = {}
+        d2h_indices: List[int] = []
+        for transfer_index, transfer in enumerate(self._transfers):
+            if transfer.kind == "D2H":
+                d2h_indices.append(transfer_index)
+                continue
+            lifetime = lifetimes.get(transfer.tensor_name)
+            first_use = lifetime.first_use if lifetime is not None else 0
+            is_weight = transfer.tensor_name in self._weight_slots
+            if self.enable_prefetch and is_weight and first_use > 0:
+                submit_at = first_use - 1
+            else:
+                submit_at = 0
+            h2d_at.setdefault(submit_at, []).append(transfer_index)
+
+        allocated: Set[str] = set()
+        freed: Set[str] = set()
+        for kernel_index, kernel in enumerate(self._kernel_steps):
+            # Stage future weights immediately before earlier compute so the
+            # copy and compute streams can overlap.
+            transfer_indices = sorted(
+                h2d_at.get(kernel_index, []),
+                key=lambda index: (
+                    lifetimes.get(
+                        self._transfers[index].tensor_name,
+                        LifetimeInterval("", 0, 0, 0),
+                    ).first_use,
+                    self._transfers[index].tensor_name,
+                ),
+            )
+            for transfer_index in transfer_indices:
+                transfer = self._transfers[transfer_index]
+                allocation = alloc_by_tensor.get(transfer.tensor_name)
+                if allocation is not None and allocation.alloc_id not in allocated:
+                    append(
+                        "ALLOC", alloc_id=allocation.alloc_id,
+                        tensor_name=allocation.tensor_name,
+                    )
+                    allocated.add(allocation.alloc_id)
+                append(
+                    "H2D", stream_id=transfer.stream_id,
+                    ref_index=transfer_index, tensor_name=transfer.tensor_name,
+                )
+                if transfer.event_id is not None:
+                    append(
+                        "EVENT_RECORD", stream_id=transfer.stream_id,
+                        event_id=transfer.event_id,
+                        tensor_name=transfer.tensor_name,
+                    )
+
+            # Allocate logical outputs/intermediates at first use.  The runtime
+            # backs all allocations with one arena and reuses the recorded
+            # byte range when a later logical allocation shares it.
+            for tensor_name, lifetime in sorted(lifetimes.items()):
+                if lifetime.first_use != kernel_index:
+                    continue
+                allocation = alloc_by_tensor.get(tensor_name)
+                if allocation is None or allocation.alloc_id in allocated:
+                    continue
+                append(
+                    "ALLOC", alloc_id=allocation.alloc_id,
+                    tensor_name=tensor_name,
+                )
+                allocated.add(allocation.alloc_id)
+
+            for event_id in dict.fromkeys(kernel.depends_on):
+                append(
+                    "EVENT_WAIT", stream_id=kernel.stream_id,
+                    event_id=event_id,
+                )
+            append(
+                "KERNEL", stream_id=kernel.stream_id,
+                ref_index=kernel_index,
+            )
+            for event_id in dict.fromkeys(kernel.signals):
+                append(
+                    "EVENT_RECORD", stream_id=kernel.stream_id,
+                    event_id=event_id,
+                )
+
+            for tensor_name, lifetime in sorted(lifetimes.items()):
+                if (
+                    lifetime.last_use != kernel_index
+                    or lifetime.is_weight or lifetime.is_input
+                    or lifetime.is_output
+                ):
+                    continue
+                allocation = alloc_by_tensor.get(tensor_name)
+                if allocation is None or allocation.alloc_id in freed:
+                    continue
+                append(
+                    "FREE", alloc_id=allocation.alloc_id,
+                    tensor_name=tensor_name,
+                )
+                freed.add(allocation.alloc_id)
+
+        for transfer_index in d2h_indices:
+            transfer = self._transfers[transfer_index]
+            for event_id in dict.fromkeys(transfer.depends_on):
+                append(
+                    "EVENT_WAIT", stream_id=transfer.stream_id,
+                    event_id=event_id,
+                    tensor_name=transfer.tensor_name,
+                )
+            append(
+                "D2H", stream_id=transfer.stream_id,
+                ref_index=transfer_index, tensor_name=transfer.tensor_name,
+            )
+
+        self._timeline = actions
 
     # ── Helpers ────────────────────────────────────────────────────
 

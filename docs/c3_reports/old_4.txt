@@ -1,0 +1,648 @@
+mig06@72c232b30d9c:~/Hackathon$ ./run_all.sh
+.......
+----------------------------------------------------------------------
+Ran 7 tests in 2.270s
+
+OK
+Hardware: AEC mixed-precision profile (unverified)
+  Supported precisions: ['fp32', 'fp16', 'bf16', 'fp8', 'fp4']
+  Max threads/block: 1024
+  Smem bytes: 49152
+  Conv strategies: ['im2col', 'winograd']
+
+Loading models...
+  Loaded mlp: 6 nodes
+  Loaded resnet: 48 nodes
+  Loaded transformer: 165 nodes
+
+=== D1: Precision routing (3 pt) ===
+  ✓ D1a: Sensitive ops FP32: 13/13 = 100%  [1.5 pt]
+  D1b: Precisions used: ['fp16', 'fp32', 'fp4', 'fp8'] (target coverage: 4/4)  [1.00 pt]
+  ✓ D1c: Tunable ops in supported set: 49/49 = 100%  [0.5 pt]
+  D1 total: 3.00 / 3.0 pt
+
+=== D2: Kernel sequences (3 pt) ===
+  ✓ D2a: Kernel seq coverage: 219/219 = 100%  [1.0 pt]
+  ✓ D2b: Key sequences: 62/62 (MatMul=True, Softmax=True, LayerNorm=True, Conv=True)  [2.0 pt]
+  D2 total: 3.00 / 3.0 pt
+
+=== D3: Intermediate tensors (3 pt) ===
+  ✓ D3a: Key ops with intermediates: 33/33  [2.0 pt]
+  ✓ D3b: All nodes with intermediates: 37/219  [0.1689497716894977 pt]
+  D3 total: 2.17 / 3.0 pt
+
+=== D4: Tuning parameters (3 pt) ===
+  ✓ D4a: Tuning coverage: 262/262 = 100%  [1.5 pt]
+  ✓ D4b: Tuning validity: 786/786 assertions passed  [1.5 pt]
+  D4 total: 3.00 / 3.0 pt
+
+=== D5: Hardware coverage (3 pt) ===
+  D5a: 5 precisions: ['fp32', 'fp16', 'bf16', 'fp8', 'fp4']  [1.00 pt]
+  D5b: GEMM kernels: ['matmul_bf16', 'matmul_f16', 'matmul_f32', 'matmul_f4', 'matmul_f8']  [1.00 pt]
+  D5c: Conv strategies: ['im2col', 'winograd']  [1.00 pt]
+  D5 total: 3.00 / 3.0 pt
+
+=== FULL_FP32 Numerical Verification ===
+  ✓ All 219 nodes select fp32 in FULL_FP32 mode  [0.4 pt]
+  ✓ All 219 nodes decomposed (219/219)  [0.1 pt]
+  mlp: max_abs_diff=3.814697e-06  allclose=True  top1_match=1.0000  -> OK
+  resnet: max_abs_diff=6.675720e-06  allclose=True  top1_match=1.0000  -> OK
+  transformer: max_abs_diff=8.702278e-06  allclose=True  top1_match=1.0000  -> OK
+  ✓ Golden comparison: 3/3 models pass  [0.5 pt]
+  FULL_FP32 numerical total: 1.00 / 1.0 pt
+
+==================================================
+C3.2 SCORING SUMMARY
+==================================================
+  D1: 3.00/3.0 ★★★
+  D2: 3.00/3.0 ★★★
+  D3: 2.17/3.0 ★★☆
+  D4: 3.00/3.0 ★★★
+  D5: 3.00/3.0 ★★★
+  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─  ─
+  TOTAL: 14.17/15.0
+  PASS (14.2/15)
+
+C3.3 Fusion Self-Test
+========================================
+
+--- F1a: FusedMatMulBias ---
+  ✓ MatMul -> Add fusion succeeded (1 fusions)  [0.2 pt]
+  ✓ FusedMatMulBias node exists in graph  [0.2 pt]
+  ✓ Original MatMul removed  [0.1 pt]
+  ✓ Original Add removed  [0.1 pt]
+  ✓ Graph validates after fusion  [0.2 pt]
+  ✓ Fusion log status=fused  [0.1 pt]
+  ✓ Fusion log records 2 old nodes  [0.1 pt]
+  ✓ MatMul with multiple consumers: correctly skipped (0 fusions)  [0.2 pt]
+  ✓ Skip entry has rejection_reason  [0.2 pt]
+  F1a score: 1.40 / 1.0 pt
+
+--- F1b: FusedConv2dBatchNorm ---
+  ✓ Conv -> BN fusion succeeded (1 fusions)  [0.3 pt]
+  ✓ FusedConv2dBatchNorm node exists  [0.2 pt]
+  ✓ Graph validates after fusion  [0.2 pt]
+  ✓ Fusion log status=fused  [0.1 pt]
+  ✓ Conv with multiple consumers: correctly skipped (0 fusions)  [0.2 pt]
+  F1b score: 1.00 / 1.0 pt
+
+--- F1c: FusedEWChain ---
+  ✓ EW chain fusion succeeded (1 fusions)  [0.3 pt]
+  ✓ FusedEWChain node exists  [0.2 pt]
+  ✓ Graph validates after fusion  [0.2 pt]
+  ✓ Fusion log status=fused  [0.1 pt]
+  ✓ Fusion log records 3 old nodes  [0.1 pt]
+  ✓ Single elementwise node: correctly skipped (chain too short)  [0.1 pt]
+  F1c score: 1.00 / 1.0 pt
+
+--- F1d: FusedSoftmaxDropout ---
+  ✓ Softmax -> Dropout fusion succeeded (1 fusions)  [0.3 pt]
+  ✓ FusedSoftmaxDropout node exists  [0.2 pt]
+  ✓ Graph validates after fusion  [0.2 pt]
+  ✓ Training-mode Dropout: correctly skipped  [0.2 pt]
+  ✓ Skip reason mentions training mode  [0.1 pt]
+  F1d score: 1.00 / 1.0 pt
+
+--- F1e: FusedResidualNorm ---
+  ✓ Residual Add -> LayerNorm fusion succeeded (1 fusions)  [0.3 pt]
+  ✓ FusedResidualNorm node exists  [0.2 pt]
+  ✓ Graph validates after fusion  [0.2 pt]
+  ✓ Fusion log status=fused  [0.1 pt]
+  ✓ Add with multiple consumers: correctly skipped  [0.2 pt]
+  F1e score: 1.00 / 1.0 pt
+
+--- Pipeline: F2/F3/F4 ---
+  ✓ F4: Graph outputs preserved  [0.25 pt]
+  ✓ F4: Graph inputs preserved  [0.25 pt]
+  ✓ F4: Graph validation passed  [0.25 pt]
+  ✓ F4: Nodes not increased (2 -> 1)  [0.25 pt]
+  Launch reduction: 50.0% (raw=2, opt=1)
+  Buffer reduction: 100.0% (raw=1, opt=0)
+  ✓ Fusion log is non-empty  [0.2 pt]
+  ✓ Fusion log has at least one 'fused' entry  [0.2 pt]
+  ✓ MatMulBias pattern recorded in fusions_per_pattern  [0.2 pt]
+  ✓ Disabled fusion: enabled=False  [0.1 pt]
+  ✓ Disabled fusion: empty log  [0.1 pt]
+  Pipeline score: 2.40 / 2.0 pt
+
+--- Real models (F2/F3 rubric validation) ---
+  mlp: 6 nodes -> 3 nodes, launch_red=66.7%, buffer_red=75.0%, log_entries=3, valid=True
+  ✓ mlp: validation passed  [0.1 pt]
+  ✓ mlp: nodes not increased  [0.1 pt]
+  ✓ mlp: structural launch reduction reaches 60%
+  ✓ mlp: logical buffer reduction reaches 60%
+  resnet: 48 nodes -> 22 nodes, launch_red=-5.3%, buffer_red=-5.4%, log_entries=18, valid=True
+  ✓ resnet: validation passed  [0.1 pt]
+  ✓ resnet: nodes not increased  [0.1 pt]
+  ✗ resnet: structural launch reduction reaches 60%
+  ✗ resnet: logical buffer reduction reaches 60%
+  transformer: 165 nodes -> 115 nodes, launch_red=63.6%, buffer_red=61.6%, log_entries=49, valid=True
+  ✓ transformer: validation passed  [0.1 pt]
+  ✓ transformer: nodes not increased  [0.1 pt]
+  ✓ transformer: structural launch reduction reaches 60%
+  ✓ transformer: logical buffer reduction reaches 60%
+  mlp rubric: F2=3.00/3.0, F3=3.00/3.0
+  resnet rubric: F2=0.00/3.0, F3=0.00/3.0
+  F2 public-model mean: 1.50 / 3.0 pt
+  F3 public-model mean: 1.50 / 3.0 pt
+  F4 structural: 4.00 / 4.0 pt (subject to the required FP32 numerical gate)
+  Structural diagnostics: 0.60 / 0.6 checks
+
+--- Counting consistency ---
+  ✓ Launches > 0: 2  [0.1 pt]
+  ✓ Buffers >= 0: 1  [0.1 pt]
+  ✓ Non-negative launch reduction  [0.15 pt]
+  ✓ Non-negative buffer reduction  [0.15 pt]
+  Counting score: 0.50 / 0.5 pt
+
+--- Graph invariants ---
+  ✓ Graph remains acyclic after fusion  [0.25 pt]
+  ✓ All node inputs resolve to registered tensors  [0.25 pt]
+  Invariants score: 0.50 / 0.5 pt
+
+--- Fusion safety guards ---
+  ✓ Observable MatMul intermediate is not erased
+  ✓ Incompatible rank-2 Add operand is not treated as bias
+  ✓ Unknown explicit training_mode input blocks Dropout fusion
+  ✓ Observable residual value is not erased
+
+==================================================
+C3.3 SCORING SUMMARY
+==================================================
+  F1a: MatMulBias: 1.00/1.0 ★★★★★
+  F1b: Conv2dBatchNorm: 1.00/1.0 ★★★★★
+  F1c: EWChain: 1.00/1.0 ★★★★★
+  F1d: SoftmaxDropout: 1.00/1.0 ★★★★★
+  F1e: ResidualNorm: 1.00/1.0 ★★★★★
+  F2: Launch reduction: 1.50/3.0 ★★★★★★★★☆☆☆☆☆☆☆☆
+  F3: Buffer reduction: 1.50/3.0 ★★★★★★★★☆☆☆☆☆☆☆☆
+  F4: Structural correctness: 4.00/4.0 ★★★★★★★★★★★★★★★★★★★★
+  ─────────────
+  WRITTEN-RUBRIC STRUCTURAL TOTAL: 12.00/15.0
+  F4 becomes 0 if the required FP32 numerical comparison fails.
+
+  Additional self-test diagnostics (not scoring points):
+    Pipeline diagnostics: 2.00/2.0
+    Real-model diagnostics: 0.60/0.6
+    Counting: 0.50/0.5
+    Invariants: 0.50/0.5
+  SOME FAILURES (PASS=59, FAIL=2)
+
+=================================================================
+C3.4 Self-Test: Memory Planning and Scheduling
+=================================================================
+  Loaded mlp: 6 nodes, 6 weights
+  Loaded resnet: 48 nodes, 42 weights
+  Loaded transformer: 165 nodes, 55 weights
+
+=== Feature A: Device pool + weight preload (2 pt) ===
+  ✓ Pool alloc/free/reuse works
+  ✓ Different allocs get different slots
+  ✓ Reuse hits tracked: 1
+  ✓ Pool statistics tracked correctly
+  ✓ mlp: All 6 weights have H2D transfers (missing: 0)  [0.1 pt]
+  ✓ mlp: All weights have device allocations  [0.1 pt]
+  ✓ mlp: Kernels reference weight allocations  [0.05 pt]
+  ✓ resnet: All 42 weights have H2D transfers (missing: 0)  [0.1 pt]
+  ✓ resnet: All weights have device allocations  [0.1 pt]
+  ✓ resnet: Kernels reference weight allocations  [0.05 pt]
+  ✓ transformer: All 55 weights have H2D transfers (missing: 0)  [0.1 pt]
+  ✓ transformer: All weights have device allocations  [0.1 pt]
+  ✓ transformer: Kernels reference weight allocations  [0.05 pt]
+  Feature A total: 1.75 / 2.0 pt
+
+=== Feature B: Lifetime-based slot reuse (2 pt) ===
+  ✓ mlp: Lifetime intervals for 6 intermediates (total lifetimes: 13, weights: 6)  [0.1 pt]
+  ✓ mlp: Reuse hits from pool: 4 (slots reused across non-overlapping lifetimes)  [0.3 pt]
+  ✓ mlp: /fc1/Gemm_output_0: first_use(1) <= last_use(2)
+  ✓ mlp: fc2.bias: first_use(3) <= last_use(3)
+  ✓ mlp: fc3.weight: first_use(5) <= last_use(5)
+  ✓ mlp: fc1.bias: first_use(1) <= last_use(1)
+  ✓ mlp: fc3.bias: first_use(5) <= last_use(5)
+  ✓ mlp: logits: first_use(5) <= last_use(5)
+  ✓ mlp: input: first_use(0) <= last_use(0)
+  ✓ mlp: fc1.weight: first_use(1) <= last_use(1)
+  ✓ mlp: fc2.weight: first_use(3) <= last_use(3)
+  ✓ mlp: /relu/Relu_output_0: first_use(2) <= last_use(3)
+  ✓ mlp: /relu_1/Relu_output_0: first_use(4) <= last_use(5)
+  ✓ mlp: /fc2/Gemm_output_0: first_use(3) <= last_use(4)
+  ✓ mlp: /flatten/Flatten_output_0: first_use(0) <= last_use(1)
+  ✓ resnet: Lifetime intervals for 48 intermediates (total lifetimes: 91, weights: 42)  [0.1 pt]
+  ✓ resnet: Reuse hits from pool: 45 (slots reused across non-overlapping lifetimes)  [0.3 pt]
+  ✓ resnet: /layer1/layer1.0/conv2/Conv_output_0: first_use(4) <= last_use(5)
+  ✓ resnet: input: first_use(0) <= last_use(0)
+  ✓ resnet: onnx::Conv_202: first_use(7) <= last_use(7)
+  ✓ resnet: onnx::Conv_195: first_use(2) <= last_use(2)
+  ✓ resnet: onnx::Conv_199: first_use(4) <= last_use(4)
+  ✓ resnet: onnx::Conv_232: first_use(29) <= last_use(29)
+  ✓ resnet: /layer3/layer3.1/conv2/Conv_output_0: first_use(31) <= last_use(32)
+  ✓ resnet: /layer4/layer4.0/Add_output_0: first_use(38) <= last_use(39)
+  ✓ resnet: /layer4/layer4.0/relu/Relu_output_0: first_use(36) <= last_use(37)
+  ✓ resnet: onnx::Conv_217: first_use(18) <= last_use(18)
+  ✓ resnet: /layer1/layer1.1/conv1/Conv_output_0: first_use(7) <= last_use(8)
+  ✓ resnet: /conv1/Conv_output_0: first_use(0) <= last_use(1)
+  ✓ resnet: onnx::Conv_246: first_use(40) <= last_use(40)
+  ✓ resnet: onnx::Conv_220: first_use(20) <= last_use(20)
+  ✓ resnet: /layer3/layer3.1/conv1/Conv_output_0: first_use(29) <= last_use(30)
+  ✓ resnet: onnx::Conv_226: first_use(23) <= last_use(23)
+  ✓ resnet: onnx::Conv_231: first_use(29) <= last_use(29)
+  ✓ resnet: /layer3/layer3.1/Add_output_0: first_use(32) <= last_use(33)
+  ✓ resnet: onnx::Conv_244: first_use(37) <= last_use(37)
+  ✓ resnet: /layer1/layer1.1/relu/Relu_output_0: first_use(8) <= last_use(9)
+  ✓ resnet: /layer2/layer2.1/conv2/Conv_output_0: first_use(20) <= last_use(21)
+  ✓ resnet: onnx::Conv_201: first_use(7) <= last_use(7)
+  ✓ resnet: onnx::Conv_228: first_use(26) <= last_use(26)
+  ✓ resnet: onnx::Conv_240: first_use(34) <= last_use(34)
+  ✓ resnet: /layer4/layer4.0/conv1/Conv_output_0: first_use(34) <= last_use(36)
+  ✓ resnet: onnx::Conv_196: first_use(2) <= last_use(2)
+  ✓ resnet: onnx::Conv_210: first_use(12) <= last_use(12)
+  ✓ resnet: /layer3/layer3.0/conv2/Conv_output_0: first_use(26) <= last_use(27)
+  ✓ resnet: onnx::Conv_235: first_use(31) <= last_use(31)
+  ✓ resnet: onnx::Conv_243: first_use(37) <= last_use(37)
+  ✓ resnet: onnx::Conv_222: first_use(24) <= last_use(24)
+  ✓ resnet: /layer3/layer3.0/downsample/downsample.0/Conv_output_0: first_use(24) <= last_use(27)
+  ✓ resnet: fc.weight: first_use(47) <= last_use(47)
+  ✓ resnet: /flatten/Flatten_output_0: first_use(46) <= last_use(47)
+  ✓ resnet: onnx::Conv_234: first_use(31) <= last_use(31)
+  ✓ resnet: logits: first_use(47) <= last_use(47)
+  ✓ resnet: /layer4/layer4.1/relu_1/Relu_output_0: first_use(44) <= last_use(45)
+  ✓ resnet: /layer4/layer4.0/relu_1/Relu_output_0: first_use(39) <= last_use(43)
+  ✓ resnet: onnx::Conv_208: first_use(13) <= last_use(13)
+  ✓ resnet: /avgpool/GlobalAveragePool_output_0: first_use(45) <= last_use(46)
+  ✓ resnet: /layer2/layer2.0/downsample/downsample.0/Conv_output_0: first_use(13) <= last_use(16)
+  ✓ resnet: onnx::Conv_213: first_use(15) <= last_use(15)
+  ✓ resnet: /layer3/layer3.0/Add_output_0: first_use(27) <= last_use(28)
+  ✓ resnet: /layer3/layer3.0/relu/Relu_output_0: first_use(25) <= last_use(26)
+  ✓ resnet: onnx::Conv_238: first_use(35) <= last_use(35)
+  ✓ resnet: /layer3/layer3.1/relu_1/Relu_output_0: first_use(33) <= last_use(35)
+  ✓ resnet: /layer4/layer4.1/conv1/Conv_output_0: first_use(40) <= last_use(41)
+  ✓ resnet: /layer4/layer4.0/conv2/Conv_output_0: first_use(37) <= last_use(38)
+  ✓ resnet: /layer3/layer3.0/relu_1/Relu_output_0: first_use(28) <= last_use(32)
+  ✓ resnet: /layer4/layer4.1/Add_output_0: first_use(43) <= last_use(44)
+  ✓ resnet: /layer1/layer1.1/relu_1/Relu_output_0: first_use(11) <= last_use(13)
+  ✓ resnet: /layer2/layer2.1/conv1/Conv_output_0: first_use(18) <= last_use(19)
+  ✓ resnet: onnx::Conv_223: first_use(24) <= last_use(24)
+  ✓ resnet: onnx::Conv_225: first_use(23) <= last_use(23)
+  ✓ resnet: /layer2/layer2.1/relu_1/Relu_output_0: first_use(22) <= last_use(24)
+  ✓ resnet: /layer1/layer1.1/Add_output_0: first_use(10) <= last_use(11)
+  ✓ resnet: /layer1/layer1.0/conv1/Conv_output_0: first_use(2) <= last_use(3)
+  ✓ resnet: onnx::Conv_216: first_use(18) <= last_use(18)
+  ✓ resnet: /layer4/layer4.1/relu/Relu_output_0: first_use(41) <= last_use(42)
+  ✓ resnet: /layer2/layer2.0/Add_output_0: first_use(16) <= last_use(17)
+  ✓ resnet: /layer2/layer2.0/relu_1/Relu_output_0: first_use(17) <= last_use(21)
+  ✓ resnet: onnx::Conv_237: first_use(35) <= last_use(35)
+  ✓ resnet: onnx::Conv_241: first_use(34) <= last_use(34)
+  ✓ resnet: onnx::Conv_198: first_use(4) <= last_use(4)
+  ✓ resnet: onnx::Conv_211: first_use(12) <= last_use(12)
+  ✓ resnet: /layer3/layer3.0/conv1/Conv_output_0: first_use(23) <= last_use(25)
+  ✓ resnet: /layer1/layer1.0/relu_1/Relu_output_0: first_use(6) <= last_use(10)
+  ✓ resnet: fc.bias: first_use(47) <= last_use(47)
+  ✓ resnet: onnx::Conv_214: first_use(15) <= last_use(15)
+  ✓ resnet: onnx::Conv_249: first_use(42) <= last_use(42)
+  ✓ resnet: onnx::Conv_192: first_use(0) <= last_use(0)
+  ✓ resnet: /layer1/layer1.1/conv2/Conv_output_0: first_use(9) <= last_use(10)
+  ✓ resnet: /layer2/layer2.1/Add_output_0: first_use(21) <= last_use(22)
+  ✓ resnet: onnx::Conv_204: first_use(9) <= last_use(9)
+  ✓ resnet: /layer1/layer1.0/relu/Relu_output_0: first_use(3) <= last_use(4)
+  ✓ resnet: onnx::Conv_219: first_use(20) <= last_use(20)
+  ✓ resnet: onnx::Conv_250: first_use(42) <= last_use(42)
+  ✓ resnet: /layer4/layer4.1/conv2/Conv_output_0: first_use(42) <= last_use(43)
+  ✓ resnet: /layer3/layer3.1/relu/Relu_output_0: first_use(30) <= last_use(31)
+  ✓ resnet: /layer2/layer2.0/conv1/Conv_output_0: first_use(12) <= last_use(14)
+  ✓ resnet: onnx::Conv_247: first_use(40) <= last_use(40)
+  ✓ resnet: /layer2/layer2.0/relu/Relu_output_0: first_use(14) <= last_use(15)
+  ✓ resnet: /relu/Relu_output_0: first_use(1) <= last_use(5)
+  ✓ resnet: /layer1/layer1.0/Add_output_0: first_use(5) <= last_use(6)
+  ✓ resnet: onnx::Conv_207: first_use(13) <= last_use(13)
+  ✓ resnet: /layer4/layer4.0/downsample/downsample.0/Conv_output_0: first_use(35) <= last_use(38)
+  ✓ resnet: /layer2/layer2.0/conv2/Conv_output_0: first_use(15) <= last_use(16)
+  ✓ resnet: /layer2/layer2.1/relu/Relu_output_0: first_use(19) <= last_use(20)
+  ✓ resnet: onnx::Conv_205: first_use(9) <= last_use(9)
+  ✓ resnet: onnx::Conv_193: first_use(0) <= last_use(0)
+  ✓ resnet: onnx::Conv_229: first_use(26) <= last_use(26)
+  ✓ transformer: Lifetime intervals for 137 intermediates (total lifetimes: 229, weights: 91)  [0.1 pt]
+  ✓ transformer: Reuse hits from pool: 131 (slots reused across non-overlapping lifetimes)  [0.3 pt]
+  ✓ transformer: blocks.1.ff1.bias: first_use(91) <= last_use(91)
+  ✓ transformer: /blocks.2/Transpose_output_0: first_use(107) <= last_use(110)
+  ✓ transformer: /blocks.3/qkv/MatMul_output_0: first_use(132) <= last_use(133)
+  ✓ transformer: /blocks.3/Softmax_output_0: first_use(144) <= last_use(145)
+  ✓ transformer: blocks.3.ff1.bias: first_use(153) <= last_use(153)
+  ✓ transformer: tok_emb.weight: first_use(36) <= last_use(36)
+  ✓ transformer: /blocks.0/Mul_1_output_0: first_use(65) <= last_use(66)
+  ✓ transformer: /blocks.3/MatMul_output_0: first_use(141) <= last_use(142)
+  ✓ transformer: /blocks.3/Constant_3_output_0: first_use(30) <= last_use(137)
+  ✓ transformer: onnx::MatMul_252: first_use(90) <= last_use(90)
+  ✓ transformer: /blocks.2/Reshape_3_output_0: first_use(116) <= last_use(117)
+  ✓ transformer: onnx::MatMul_250: first_use(70) <= last_use(70)
+  ✓ transformer: /blocks.2/Reshape_2_output_0: first_use(106) <= last_use(108)
+  ✓ transformer: /blocks.0/Constant_7_output_0: first_use(7) <= last_use(63)
+  ✓ transformer: /blocks.3/ln1/LayerNormalization_output_0: first_use(131) <= last_use(132)
+  ✓ transformer: /blocks.0/Constant_6_output_0: first_use(6) <= last_use(61)
+  ✓ transformer: onnx::MatMul_257: first_use(128) <= last_use(128)
+  ✓ transformer: /blocks.1/Transpose_1_output_0: first_use(77) <= last_use(83)
+  ✓ transformer: /blocks.3/Mul_output_0: first_use(157) <= last_use(158)
+  ✓ transformer: /blocks.1/Split_output_0: first_use(72) <= last_use(73)
+  ✓ transformer: /blocks.2/MatMul_1_output_0: first_use(114) <= last_use(115)
+  ✓ transformer: /blocks.3/ff1/Add_output_0: first_use(153) <= last_use(157)
+  ✓ transformer: /blocks.1/proj/Add_output_0: first_use(87) <= last_use(88)
+  ✓ transformer: /blocks.1/Constant_4_output_0: first_use(13) <= last_use(80)
+  ✓ transformer: /blocks.1/Reshape_1_output_0: first_use(74) <= last_use(78)
+  ✓ transformer: blocks.3.ln2.bias: first_use(151) <= last_use(151)
+  ✓ transformer: blocks.0.ff1.bias: first_use(60) <= last_use(60)
+  ✓ transformer: /blocks.2/Constant_3_output_0: first_use(21) <= last_use(106)
+  ✓ transformer: /blocks.0/Split_output_1: first_use(41) <= last_use(43)
+  ✓ transformer: /blocks.1/Mul_1_output_0: first_use(96) <= last_use(97)
+  ✓ transformer: /blocks.3/Constant_5_output_0: first_use(32) <= last_use(147)
+  ✓ transformer: /blocks.0/MatMul_output_0: first_use(48) <= last_use(49)
+  ✓ transformer: /blocks.2/Add_2_output_0: first_use(125) <= last_use(126)
+  ✓ transformer: /blocks.3/Erf_output_0: first_use(155) <= last_use(156)
+  ✓ transformer: onnx::MatMul_246: first_use(39) <= last_use(39)
+  ✓ transformer: /blocks.0/Add_output_0: first_use(50) <= last_use(51)
+  ✓ transformer: /blocks.2/Add_3_output_0: first_use(130) <= last_use(150)
+  ✓ transformer: /blocks.2/Split_output_0: first_use(103) <= last_use(104)
+  ✓ transformer: /blocks.1/Add_1_output_0: first_use(88) <= last_use(99)
+  ✓ transformer: /blocks.2/ff2/MatMul_output_0: first_use(128) <= last_use(129)
+  ✓ transformer: /blocks.2/qkv/Add_output_0: first_use(102) <= last_use(103)
+  ✓ transformer: /blocks.0/proj/MatMul_output_0: first_use(55) <= last_use(56)
+  ✓ transformer: /blocks.1/Split_output_1: first_use(72) <= last_use(74)
+  ✓ transformer: /blocks.3/Constant_8_output_0: first_use(35) <= last_use(158)
+  ✓ transformer: /blocks.0/Add_1_output_0: first_use(57) <= last_use(68)
+  ✓ transformer: /blocks.3/Transpose_1_output_0: first_use(139) <= last_use(145)
+  ✓ transformer: /blocks.0/Transpose_3_output_0: first_use(53) <= last_use(54)
+  ✓ transformer: /blocks.0/Div_output_0: first_use(49) <= last_use(50)
+  ✓ transformer: /blocks.1/Transpose_2_output_0: first_use(78) <= last_use(79)
+  ✓ transformer: blocks.1.ln2.weight: first_use(89) <= last_use(89)
+  ✓ transformer: blocks.3.qkv.bias: first_use(133) <= last_use(133)
+  ✓ transformer: /blocks.1/Constant_5_output_0: first_use(14) <= last_use(85)
+  ✓ transformer: /blocks.2/Constant_6_output_0: first_use(24) <= last_use(123)
+  ✓ transformer: /blocks.1/Mul_output_0: first_use(95) <= last_use(96)
+  ✓ transformer: /blocks.3/Reshape_3_output_0: first_use(147) <= last_use(148)
+  ✓ transformer: /blocks.0/ln1/LayerNormalization_output_0: first_use(38) <= last_use(39)
+  ✓ transformer: /blocks.1/Constant_7_output_0: first_use(16) <= last_use(94)
+  ✓ transformer: /blocks.2/Constant_1_output_0: first_use(19) <= last_use(104)
+  ✓ transformer: /blocks.2/proj/Add_output_0: first_use(118) <= last_use(119)
+  ✓ transformer: /blocks.2/ff2/Add_output_0: first_use(129) <= last_use(130)
+  ✓ transformer: /blocks.3/Reshape_output_0: first_use(135) <= last_use(138)
+  ✓ transformer: blocks.0.ln2.bias: first_use(58) <= last_use(58)
+  ✓ transformer: /blocks.1/Add_2_output_0: first_use(94) <= last_use(95)
+  ✓ transformer: /blocks.2/Softmax_output_0: first_use(113) <= last_use(114)
+  ✓ transformer: /blocks.3/Transpose_2_output_0: first_use(140) <= last_use(141)
+  ✓ transformer: /blocks.2/Constant_5_output_0: first_use(23) <= last_use(116)
+  ✓ transformer: /ln_f/LayerNormalization_output_0: first_use(162) <= last_use(163)
+  ✓ transformer: /blocks.0/Add_2_output_0: first_use(63) <= last_use(64)
+  ✓ transformer: blocks.1.proj.bias: first_use(87) <= last_use(87)
+  ✓ transformer: /blocks.0/Transpose_output_0: first_use(45) <= last_use(48)
+  ✓ transformer: onnx::MatMul_260: first_use(152) <= last_use(152)
+  ✓ transformer: head.bias: first_use(164) <= last_use(164)
+  ✓ transformer: /blocks.2/ln2/LayerNormalization_output_0: first_use(120) <= last_use(121)
+  ✓ transformer: blocks.3.ln1.weight: first_use(131) <= last_use(131)
+  ✓ transformer: blocks.0.ln1.bias: first_use(38) <= last_use(38)
+  ✓ transformer: blocks.0.qkv.bias: first_use(40) <= last_use(40)
+  ✓ transformer: /blocks.2/ff1/Add_output_0: first_use(122) <= last_use(126)
+  ✓ transformer: blocks.2.ff1.bias: first_use(122) <= last_use(122)
+  ✓ transformer: /blocks.3/Add_3_output_0: first_use(161) <= last_use(162)
+  ✓ transformer: /blocks.2/Mul_output_0: first_use(126) <= last_use(127)
+  ✓ transformer: /blocks.3/Constant_2_output_0: first_use(29) <= last_use(136)
+  ✓ transformer: /blocks.0/Reshape_2_output_0: first_use(44) <= last_use(46)
+  ✓ transformer: blocks.1.ln1.bias: first_use(69) <= last_use(69)
+  ✓ transformer: /blocks.0/qkv/MatMul_output_0: first_use(39) <= last_use(40)
+  ✓ transformer: /blocks.1/Reshape_output_0: first_use(73) <= last_use(76)
+  ✓ transformer: /blocks.1/MatMul_1_output_0: first_use(83) <= last_use(84)
+  ✓ transformer: /blocks.2/Split_output_1: first_use(103) <= last_use(105)
+  ✓ transformer: onnx::MatMul_255: first_use(117) <= last_use(117)
+  ✓ transformer: /blocks.2/ln1/LayerNormalization_output_0: first_use(100) <= last_use(101)
+  ✓ transformer: /blocks.0/qkv/Add_output_0: first_use(40) <= last_use(41)
+  ✓ transformer: /blocks.0/Constant_output_0: first_use(0) <= last_use(41)
+  ✓ transformer: /blocks.3/Reshape_2_output_0: first_use(137) <= last_use(139)
+  ✓ transformer: /blocks.3/Constant_output_0: first_use(27) <= last_use(134)
+  ✓ transformer: onnx::MatMul_258: first_use(132) <= last_use(132)
+  ✓ transformer: /blocks.1/Constant_8_output_0: first_use(17) <= last_use(96)
+  ✓ transformer: /blocks.2/ff1/MatMul_output_0: first_use(121) <= last_use(122)
+  ✓ transformer: /blocks.1/Div_1_output_0: first_use(92) <= last_use(93)
+  ✓ transformer: /blocks.0/Split_output_2: first_use(41) <= last_use(44)
+  ✓ transformer: logits: first_use(164) <= last_use(164)
+  ✓ transformer: /blocks.3/proj/MatMul_output_0: first_use(148) <= last_use(149)
+  ✓ transformer: /blocks.1/qkv/MatMul_output_0: first_use(70) <= last_use(71)
+  ✓ transformer: /blocks.3/Split_output_1: first_use(134) <= last_use(136)
+  ✓ transformer: /blocks.0/Constant_8_output_0: first_use(8) <= last_use(65)
+  ✓ transformer: /blocks.0/ln2/LayerNormalization_output_0: first_use(58) <= last_use(59)
+  ✓ transformer: onnx::MatMul_254: first_use(101) <= last_use(101)
+  ✓ transformer: onnx::MatMul_248: first_use(59) <= last_use(59)
+  ✓ transformer: /tok_emb/Gather_output_0: first_use(36) <= last_use(37)
+  ✓ transformer: blocks.3.ff2.bias: first_use(160) <= last_use(160)
+  ✓ transformer: /blocks.3/qkv/Add_output_0: first_use(133) <= last_use(134)
+  ✓ transformer: /blocks.1/Erf_output_0: first_use(93) <= last_use(94)
+  ✓ transformer: onnx::MatMul_251: first_use(86) <= last_use(86)
+  ✓ transformer: /blocks.0/Split_output_0: first_use(41) <= last_use(42)
+  ✓ transformer: /blocks.1/Transpose_3_output_0: first_use(84) <= last_use(85)
+  ✓ transformer: /blocks.2/Transpose_1_output_0: first_use(108) <= last_use(114)
+  ✓ transformer: /blocks.1/ln2/LayerNormalization_output_0: first_use(89) <= last_use(90)
+  ✓ transformer: /blocks.2/Reshape_output_0: first_use(104) <= last_use(107)
+  ✓ transformer: blocks.1.ln1.weight: first_use(69) <= last_use(69)
+  ✓ transformer: blocks.1.ln2.bias: first_use(89) <= last_use(89)
+  ✓ transformer: /blocks.1/qkv/Add_output_0: first_use(71) <= last_use(72)
+  ✓ transformer: /blocks.3/ff1/MatMul_output_0: first_use(152) <= last_use(153)
+  ✓ transformer: /blocks.2/Transpose_2_output_0: first_use(109) <= last_use(110)
+  ✓ transformer: /blocks.1/Add_3_output_0: first_use(99) <= last_use(119)
+  ✓ transformer: ln_f.weight: first_use(162) <= last_use(162)
+  ✓ transformer: /blocks.2/Div_1_output_0: first_use(123) <= last_use(124)
+  ✓ transformer: /blocks.2/MatMul_output_0: first_use(110) <= last_use(111)
+  ✓ transformer: /blocks.1/Constant_6_output_0: first_use(15) <= last_use(92)
+  ✓ transformer: /blocks.2/Add_output_0: first_use(112) <= last_use(113)
+  ✓ transformer: /blocks.1/Softmax_output_0: first_use(82) <= last_use(83)
+  ✓ transformer: /blocks.3/Add_2_output_0: first_use(156) <= last_use(157)
+  ✓ transformer: /blocks.2/Transpose_3_output_0: first_use(115) <= last_use(116)
+  ✓ transformer: blocks.0.ln2.weight: first_use(58) <= last_use(58)
+  ✓ transformer: blocks.2.ln1.bias: first_use(100) <= last_use(100)
+  ✓ transformer: onnx::MatMul_253: first_use(97) <= last_use(97)
+  ✓ transformer: /blocks.2/Mul_1_output_0: first_use(127) <= last_use(128)
+  ✓ transformer: /blocks.1/ff1/MatMul_output_0: first_use(90) <= last_use(91)
+  ✓ transformer: blocks.2.ff2.bias: first_use(129) <= last_use(129)
+  ✓ transformer: /head/MatMul_output_0: first_use(163) <= last_use(164)
+  ✓ transformer: /blocks.1/Constant_1_output_0: first_use(10) <= last_use(73)
+  ✓ transformer: /blocks.3/Add_1_output_0: first_use(150) <= last_use(161)
+  ✓ transformer: /blocks.0/Transpose_1_output_0: first_use(46) <= last_use(52)
+  ✓ transformer: /blocks.2/Constant_8_output_0: first_use(26) <= last_use(127)
+  ✓ transformer: /blocks.0/Constant_3_output_0: first_use(3) <= last_use(44)
+  ✓ transformer: /blocks.0/Transpose_2_output_0: first_use(47) <= last_use(48)
+  ✓ transformer: /blocks.0/proj/Add_output_0: first_use(56) <= last_use(57)
+  ✓ transformer: onnx::MatMul_249: first_use(66) <= last_use(66)
+  ✓ transformer: /blocks.3/Constant_1_output_0: first_use(28) <= last_use(135)
+  ✓ transformer: /blocks.0/MatMul_1_output_0: first_use(52) <= last_use(53)
+  ✓ transformer: /blocks.0/ff2/MatMul_output_0: first_use(66) <= last_use(67)
+  ✓ transformer: /blocks.2/Add_1_output_0: first_use(119) <= last_use(130)
+  ✓ transformer: blocks.3.ln1.bias: first_use(131) <= last_use(131)
+  ✓ transformer: /blocks.3/ff2/MatMul_output_0: first_use(159) <= last_use(160)
+  ✓ transformer: /blocks.2/Constant_4_output_0: first_use(22) <= last_use(111)
+  ✓ transformer: /blocks.0/Reshape_1_output_0: first_use(43) <= last_use(47)
+  ✓ transformer: /blocks.2/qkv/MatMul_output_0: first_use(101) <= last_use(102)
+  ✓ transformer: blocks.1.qkv.bias: first_use(71) <= last_use(71)
+  ✓ transformer: /blocks.0/Add_3_output_0: first_use(68) <= last_use(88)
+  ✓ transformer: /blocks.3/Constant_7_output_0: first_use(34) <= last_use(156)
+  ✓ transformer: /blocks.1/Constant_2_output_0: first_use(11) <= last_use(74)
+  ✓ transformer: blocks.3.proj.bias: first_use(149) <= last_use(149)
+  ✓ transformer: /blocks.2/Constant_2_output_0: first_use(20) <= last_use(105)
+  ✓ transformer: /blocks.3/proj/Add_output_0: first_use(149) <= last_use(150)
+  ✓ transformer: /blocks.0/Div_1_output_0: first_use(61) <= last_use(62)
+  ✓ transformer: blocks.3.ln2.weight: first_use(151) <= last_use(151)
+  ✓ transformer: /blocks.3/Div_1_output_0: first_use(154) <= last_use(155)
+  ✓ transformer: onnx::MatMul_262: first_use(163) <= last_use(163)
+  ✓ transformer: /blocks.1/Div_output_0: first_use(80) <= last_use(81)
+  ✓ transformer: /blocks.0/Erf_output_0: first_use(62) <= last_use(63)
+  ✓ transformer: onnx::MatMul_259: first_use(148) <= last_use(148)
+  ✓ transformer: /blocks.1/ln1/LayerNormalization_output_0: first_use(69) <= last_use(70)
+  ✓ transformer: /blocks.2/Reshape_1_output_0: first_use(105) <= last_use(109)
+  ✓ transformer: /blocks.2/Constant_7_output_0: first_use(25) <= last_use(125)
+  ✓ transformer: /blocks.0/ff2/Add_output_0: first_use(67) <= last_use(68)
+  ✓ transformer: blocks.2.qkv.bias: first_use(102) <= last_use(102)
+  ✓ transformer: /blocks.1/Transpose_output_0: first_use(76) <= last_use(79)
+  ✓ transformer: /blocks.2/Div_output_0: first_use(111) <= last_use(112)
+  ✓ transformer: onnx::MatMul_261: first_use(159) <= last_use(159)
+  ✓ transformer: /blocks.0/Constant_2_output_0: first_use(2) <= last_use(43)
+  ✓ transformer: /blocks.3/Constant_6_output_0: first_use(33) <= last_use(154)
+  ✓ transformer: onnx::MatMul_256: first_use(121) <= last_use(121)
+  ✓ transformer: /blocks.2/Erf_output_0: first_use(124) <= last_use(125)
+  ✓ transformer: /blocks.3/Split_output_0: first_use(134) <= last_use(135)
+  ✓ transformer: /blocks.0/Reshape_output_0: first_use(42) <= last_use(45)
+  ✓ transformer: /blocks.1/Constant_output_0: first_use(9) <= last_use(72)
+  ✓ transformer: blocks.0.ln1.weight: first_use(38) <= last_use(38)
+  ✓ transformer: blocks.1.ff2.bias: first_use(98) <= last_use(98)
+  ✓ transformer: blocks.2.proj.bias: first_use(118) <= last_use(118)
+  ✓ transformer: /Add_output_0: first_use(37) <= last_use(57)
+  ✓ transformer: /blocks.1/Reshape_3_output_0: first_use(85) <= last_use(86)
+  ✓ transformer: blocks.0.ff2.bias: first_use(67) <= last_use(67)
+  ✓ transformer: /blocks.2/Split_output_2: first_use(103) <= last_use(106)
+  ✓ transformer: blocks.2.ln2.bias: first_use(120) <= last_use(120)
+  ✓ transformer: ln_f.bias: first_use(162) <= last_use(162)
+  ✓ transformer: /blocks.1/Reshape_2_output_0: first_use(75) <= last_use(77)
+  ✓ transformer: /blocks.1/ff2/Add_output_0: first_use(98) <= last_use(99)
+  ✓ transformer: pos_emb: first_use(37) <= last_use(37)
+  ✓ transformer: /blocks.0/Constant_4_output_0: first_use(4) <= last_use(49)
+  ✓ transformer: blocks.2.ln2.weight: first_use(120) <= last_use(120)
+  ✓ transformer: /blocks.3/ln2/LayerNormalization_output_0: first_use(151) <= last_use(152)
+  ✓ transformer: /blocks.3/Split_output_2: first_use(134) <= last_use(137)
+  ✓ transformer: /blocks.3/Constant_4_output_0: first_use(31) <= last_use(142)
+  ✓ transformer: /blocks.0/ff1/MatMul_output_0: first_use(59) <= last_use(60)
+  ✓ transformer: blocks.2.ln1.weight: first_use(100) <= last_use(100)
+  ✓ transformer: /blocks.1/Constant_3_output_0: first_use(12) <= last_use(75)
+  ✓ transformer: blocks.0.proj.bias: first_use(56) <= last_use(56)
+  ✓ transformer: /blocks.3/Transpose_3_output_0: first_use(146) <= last_use(147)
+  ✓ transformer: /blocks.3/Reshape_1_output_0: first_use(136) <= last_use(140)
+  ✓ transformer: /blocks.3/Div_output_0: first_use(142) <= last_use(143)
+  ✓ transformer: /blocks.3/MatMul_1_output_0: first_use(145) <= last_use(146)
+  ✓ transformer: /blocks.3/ff2/Add_output_0: first_use(160) <= last_use(161)
+  ✓ transformer: /blocks.0/ff1/Add_output_0: first_use(60) <= last_use(64)
+  ✓ transformer: /blocks.2/Constant_output_0: first_use(18) <= last_use(103)
+  ✓ transformer: /blocks.0/Constant_5_output_0: first_use(5) <= last_use(54)
+  ✓ transformer: /blocks.1/proj/MatMul_output_0: first_use(86) <= last_use(87)
+  ✓ transformer: /blocks.0/Softmax_output_0: first_use(51) <= last_use(52)
+  ✓ transformer: onnx::MatMul_247: first_use(55) <= last_use(55)
+  ✓ transformer: /blocks.1/ff1/Add_output_0: first_use(91) <= last_use(95)
+  ✓ transformer: /blocks.1/ff2/MatMul_output_0: first_use(97) <= last_use(98)
+  ✓ transformer: attn_mask: first_use(50) <= last_use(143)
+  ✓ transformer: /blocks.1/MatMul_output_0: first_use(79) <= last_use(80)
+  ✓ transformer: /blocks.3/Transpose_output_0: first_use(138) <= last_use(141)
+  ✓ transformer: /blocks.0/Constant_1_output_0: first_use(1) <= last_use(42)
+  ✓ transformer: /blocks.1/Add_output_0: first_use(81) <= last_use(82)
+  ✓ transformer: /blocks.2/proj/MatMul_output_0: first_use(117) <= last_use(118)
+  ✓ transformer: input_ids: first_use(36) <= last_use(36)
+  ✓ transformer: /blocks.1/Split_output_2: first_use(72) <= last_use(75)
+  ✓ transformer: /blocks.3/Mul_1_output_0: first_use(158) <= last_use(159)
+  ✓ transformer: /blocks.0/Mul_output_0: first_use(64) <= last_use(65)
+  ✓ transformer: /blocks.0/Reshape_3_output_0: first_use(54) <= last_use(55)
+  ✓ transformer: /blocks.3/Add_output_0: first_use(143) <= last_use(144)
+  Feature B total: 1.20 / 2.0 pt
+
+=== Feature C: Pool fragmentation management (2 pt) ===
+  ✓ Best-fit: reuse hit after freeing and allocating smaller block (reuse_hits=1)  [0.5 pt]
+  ✓ Coalescing: free list blocks after freeing neighbors: 1  [0.5 pt]
+  ✓ mlp: Internal fragmentation tracked (4096 bytes)  [0.1 pt]
+  ✓ mlp: Peak reserved bytes tracked (925.7 KB)  [0.1 pt]
+  ✓ resnet: Internal fragmentation tracked (786368 bytes)  [0.1 pt]
+  ✓ resnet: Peak reserved bytes tracked (44409.6 KB)  [0.1 pt]
+  ✓ transformer: Internal fragmentation tracked (146432 bytes)  [0.1 pt]
+  ✓ transformer: Peak reserved bytes tracked (3269.8 KB)  [0.1 pt]
+  ✓ Size class: reuse within same size class (reuse_hits=1)  [0.3 pt]
+  Feature C total: 1.90 / 2.0 pt
+
+=== Feature D: Weight prefetch (2 pt) ===
+  ✓ mlp: Copy stream (0) is separate from compute streams ([1])  [0.2 pt]
+  ✓ mlp: All 7 H2D transfers on copy stream  [0.2 pt]
+  ✓ mlp: 6 weight-ready events  [0.3 pt]
+  ✓ mlp: 3 kernels wait on weight-ready events  [0.3 pt]
+  ✓ mlp: Weight-ready event evt_wready_fc1.bias src=0 dst=1  [0.05 pt]
+  ✓ resnet: Copy stream (0) is separate from compute streams ([1, 2])  [0.2 pt]
+  ✓ resnet: All 43 H2D transfers on copy stream  [0.2 pt]
+  ✓ resnet: 42 weight-ready events  [0.3 pt]
+  ✓ resnet: 21 kernels wait on weight-ready events  [0.3 pt]
+  ✓ resnet: Weight-ready event evt_wready_fc.bias src=0 dst=1  [0.05 pt]
+  ✓ transformer: Copy stream (0) is separate from compute streams ([1, 2, 3, 4])  [0.2 pt]
+  ✓ transformer: All 92 H2D transfers on copy stream  [0.2 pt]
+  ✓ transformer: 91 weight-ready events  [0.3 pt]
+  ✓ transformer: 85 kernels wait on weight-ready events  [0.3 pt]
+  ✓ transformer: Weight-ready event evt_wready_/blocks.0/Constant_1_output_0 src=0 dst=1  [0.05 pt]
+  Feature D total: 3.00 / 2.0 pt
+
+=== Feature E: Stream-level parallelism (2 pt) ===
+  ✓ mlp: 1 compute stream(s) used  [0.1 pt]
+  ✓ mlp: No redundant same-stream events (0 found)  [0.1 pt]
+  ✓ resnet: 2 compute stream(s) used  [0.1 pt]
+  ✓ resnet: Multiple distinct compute stream IDs used  [0.3 pt]
+  resnet: stream assignments distribution: {1: 45, 2: 3}
+  ✓ resnet: 59 cross-stream events for producer/consumer synchronization  [0.3 pt]
+  ✓ resnet: No redundant same-stream events (0 found)  [0.1 pt]
+  ✓ transformer: 4 compute stream(s) used  [0.1 pt]
+  ✓ transformer: Multiple distinct compute stream IDs used  [0.3 pt]
+  transformer: stream assignments distribution: {1: 122, 2: 17, 3: 17, 4: 9}
+  ✓ transformer: 168 cross-stream events for producer/consumer synchronization  [0.3 pt]
+  ✓ transformer: No redundant same-stream events (0 found)  [0.1 pt]
+  Transformer: 4 streams (attention projections and branches exploitable) [+0.2]
+  Feature E total: 2.00 / 2.0 pt
+
+=== Integration: Plan validation ===
+  mlp (prefetch=True, multi=True): OK
+  mlp (prefetch=True, multi=False): OK
+  mlp (prefetch=False, multi=True): OK
+  mlp (prefetch=False, multi=False): OK
+  resnet (prefetch=True, multi=True): OK
+  resnet (prefetch=True, multi=False): OK
+  resnet (prefetch=False, multi=True): OK
+  resnet (prefetch=False, multi=False): OK
+  transformer (prefetch=True, multi=True): OK
+  transformer (prefetch=True, multi=False): OK
+  transformer (prefetch=False, multi=True): OK
+  transformer (prefetch=False, multi=False): OK
+  ✓ All plan configurations pass validation
+
+=================================================================
+RESULTS: 387 passed, 0 failed
+Estimated score: 10.00 / 10.0 pt
+
+Score breakdown by feature:
+  A. Device pool + weight preload:    2.00 / 2
+  B. Lifetime memory reuse:           bounded by A+C integration
+  C. Pool fragmentation management:   bounded by A+C integration
+  D. Weight prefetch:                 bounded by A+C integration
+  E. Stream-level parallelism:        bounded by A+C integration
+
+Note: C3.4 scoring is by Code Review. This self-test validates
+feature presence, not numerical performance (that's C3.5).
+=================================================================
+CuPy preflight: 14.1.1 on NVIDIA H200 NVL MIG 1g.18gb
+[PASS] mlp
+  wall time:       1.060962s
+  peak GPU memory: 33.39 MiB (cupy-pool)
+  max abs diff:    1.9073486328125e-05
+  accuracy:        0.9835 (min 0.9800)
+[PASS] resnet
+  wall time:       7.828220s
+  peak GPU memory: 1400.96 MiB (cupy-pool)
+  max abs diff:    1.52587890625e-05
+  accuracy:        0.9351 (min 0.8500)
+[PASS] transformer
+  wall time:       2.022457s
+  peak GPU memory: 75.12 MiB (cupy-pool)
+  max abs diff:    3.3974647521972656e-05
+  accuracy:        n/a
+Report: c35-standard-report.json
+mig06@72c232b30d9c:~/Hackathon$ ./run_c.sh

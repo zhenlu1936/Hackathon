@@ -10,7 +10,7 @@ Each pattern function:
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set
 
 from c3common.ir.graph import Graph, Node
 
@@ -36,21 +36,46 @@ def _is_initializer_or_constant(graph: Graph, tensor_name: str) -> bool:
     return tensor.is_initializer or tensor.is_constant
 
 
-def _is_bias_shape(graph: Graph, tensor_name: str) -> bool:
-    """Check if a tensor looks like a bias (1D or broadcast-compatible)."""
-    tensor = graph.tensors.get(tensor_name)
-    if tensor is None:
-        return False
-    # Accept 1D shape or shape where all dims are 1 or unknown
-    try:
-        int_dims = [int(d) for d in tensor.shape if d is not None]
-    except (ValueError, TypeError):
-        return False
-    if len(int_dims) == 1:
+def _is_graph_output(graph: Graph, tensor_name: str) -> bool:
+    """Return whether ``tensor_name`` is part of the public graph ABI."""
+    return any(tensor.name == tensor_name for tensor in graph.outputs)
+
+
+def _dim_compatible(lhs: Any, rhs: Any) -> bool:
+    """Conservatively compare two possibly-symbolic dimensions."""
+    if lhs is None or rhs is None:
         return True
-    if len(int_dims) == 0:
+    try:
+        return int(lhs) == int(rhs)
+    except (TypeError, ValueError):
+        return str(lhs) == str(rhs)
+
+
+def _is_bias_shape(graph: Graph, tensor_name: str,
+                   output_name: str = "") -> bool:
+    """Check for a channel bias compatible with the MatMul output.
+
+    C3.3 asks for MatMul followed by *bias* Add, not arbitrary broadcast Add.
+    Accept a one-dimensional channel vector or an equivalent broadcast shape
+    whose non-channel leading dimensions are all one.  Unknown metadata is not
+    enough to prove that a runtime tensor is a bias.
+    """
+    tensor = graph.tensors.get(tensor_name)
+    if tensor is None or not tensor.shape:
         return False
-    # 2D+ bias: one dimension may match the output channels
+    shape = list(tensor.shape)
+    if len(shape) > 1:
+        for dim in shape[:-1]:
+            try:
+                if int(dim) != 1:
+                    return False
+            except (TypeError, ValueError):
+                return False
+    if output_name:
+        output = graph.tensors.get(output_name)
+        if output is not None and output.shape:
+            if not _dim_compatible(shape[-1], output.shape[-1]):
+                return False
     return True
 
 
@@ -73,6 +98,58 @@ def _generate_fused_node_id(pattern: str, *parts: str) -> str:
     return f"_{pattern}_{suffix}"
 
 
+def _unique_fused_node_id(graph: Graph, pattern: str, *parts: str) -> str:
+    """Return a deterministic fused ID that does not collide in ``graph``."""
+    base = _generate_fused_node_id(pattern, *parts)
+    fused_id = base
+    suffix = 1
+    while fused_id in graph.nodes:
+        fused_id = f"{base}_{suffix}"
+        suffix += 1
+    return fused_id
+
+
+def _replace_region(
+    graph: Graph,
+    old_node_ids: List[str],
+    fused_node: Node,
+) -> List[str]:
+    """Replace ``old_node_ids`` with one node while preserving the final ABI."""
+    final_outputs = {name for name in fused_node.outputs if name}
+    removed_tensors: List[str] = []
+    for node_id in old_node_ids:
+        node = graph.nodes[node_id]
+        removed_tensors.extend(
+            name for name in node.outputs
+            if name and name not in final_outputs
+        )
+
+    for node_id in reversed(old_node_ids):
+        graph.remove_node(node_id)
+    graph.add_node(fused_node)
+    for output_name in fused_node.outputs:
+        if not output_name:
+            continue
+        if output_name not in graph.tensors:
+            graph.register_tensor(name=output_name)
+        graph.set_producer(output_name, fused_node.id)
+    return sorted(set(removed_tensors))
+
+
+def _shapes_maybe_equal(lhs: List[Any], rhs: List[Any]) -> bool:
+    """Require equal ranks and reject only provably unequal dimensions."""
+    if not lhs or not rhs or len(lhs) != len(rhs):
+        return False
+    for left, right in zip(lhs, rhs):
+        try:
+            if int(left) != int(right):
+                return False
+        except (TypeError, ValueError):
+            # Dynamic/symbolic dimensions are checked by the runtime kernel.
+            continue
+    return True
+
+
 def _is_dropout_inference(node: Node) -> bool:
     """Check if a Dropout node is in inference mode.
 
@@ -81,13 +158,14 @@ def _is_dropout_inference(node: Node) -> bool:
     - training_mode attribute is false, OR
     - the node has no explicit training attribute (default inference)
     """
-    ratio = node.attributes.get("ratio", 0.0)
-    if ratio == 0.0 or ratio == 0:
-        return True
     training = node.attributes.get("training_mode", 0)
-    if training == 0 or training is False:
-        return True
-    return False
+    if training not in (0, False, None):
+        return False
+    # Since opset 12, training_mode is the third input.  Without retained
+    # scalar payloads its value cannot be proven false, so reject conservatively.
+    if len(node.inputs) >= 3 and node.inputs[2]:
+        return False
+    return True
 
 
 # ── Pattern F1a: FusedMatMulBias ────────────────────────────────────
@@ -113,11 +191,39 @@ def fuse_matmul_bias(graph: Graph, fusion_log: List[Dict[str, Any]]) -> int:
         if node.op_type not in ("MatMul",):
             continue
 
+        # The connected one-launch epilogue kernel supports arbitrary leading
+        # dimensions on A with a shared rank-2 weight matrix B.  Batched B
+        # remains on the unfused ONNX MatMul path instead of being mislabeled.
+        if len(node.inputs) < 2:
+            continue
+        weight = graph.tensors.get(node.inputs[1])
+        if weight is None or len(weight.shape) != 2:
+            fusion_log.append({
+                "pattern": "FusedMatMulBias",
+                "status": "skipped",
+                "old_node_ids": [node_id],
+                "new_node_id": "",
+                "removed_tensors": [],
+                "rejection_reason": "Single-kernel epilogue requires rank-2 B",
+            })
+            continue
+
         # MatMul must have exactly one output tensor that goes to one consumer
         matmul_outputs = [o for o in node.outputs if o]
         if len(matmul_outputs) != 1:
             continue
         matmul_out = matmul_outputs[0]
+
+        if _is_graph_output(graph, matmul_out):
+            fusion_log.append({
+                "pattern": "FusedMatMulBias",
+                "status": "skipped",
+                "old_node_ids": [node_id],
+                "new_node_id": "",
+                "removed_tensors": [],
+                "rejection_reason": "MatMul output is an observable graph output",
+            })
+            continue
 
         if not _has_single_consumer(graph, matmul_out):
             fusion_log.append({
@@ -137,7 +243,7 @@ def fuse_matmul_bias(graph: Graph, fusion_log: List[Dict[str, Any]]) -> int:
 
         # The Add node must have two inputs: one from MatMul, one bias
         add_inputs = [i for i in consumer.inputs if i]
-        if len(add_inputs) < 2:
+        if len(add_inputs) != 2:
             continue
 
         # Identify bias input (the one NOT from MatMul)
@@ -150,14 +256,15 @@ def fuse_matmul_bias(graph: Graph, fusion_log: List[Dict[str, Any]]) -> int:
             continue
 
         # Check bias is compatible
-        if not _is_initializer_or_constant(graph, bias_input) and not _is_bias_shape(graph, bias_input):
+        if (not _is_initializer_or_constant(graph, bias_input) or
+                not _is_bias_shape(graph, bias_input, matmul_out)):
             fusion_log.append({
                 "pattern": "FusedMatMulBias",
                 "status": "skipped",
                 "old_node_ids": [node_id, consumer_id],
                 "new_node_id": "",
                 "removed_tensors": [],
-                "rejection_reason": "Bias input is not an initializer/constant or compatible shape",
+                "rejection_reason": "Bias input is not a compatible initializer/constant",
             })
             continue
 
@@ -260,6 +367,17 @@ def fuse_conv_batchnorm(graph: Graph, fusion_log: List[Dict[str, Any]]) -> int:
             continue
         conv_out = conv_outputs[0]
 
+        if _is_graph_output(graph, conv_out):
+            fusion_log.append({
+                "pattern": "FusedConv2dBatchNorm",
+                "status": "skipped",
+                "old_node_ids": [node_id],
+                "new_node_id": "",
+                "removed_tensors": [],
+                "rejection_reason": "Conv output is an observable graph output",
+            })
+            continue
+
         if not _has_single_consumer(graph, conv_out):
             fusion_log.append({
                 "pattern": "FusedConv2dBatchNorm",
@@ -274,6 +392,18 @@ def fuse_conv_batchnorm(graph: Graph, fusion_log: List[Dict[str, Any]]) -> int:
         consumer_id = _get_consumers(graph, conv_out)[0]
         consumer = graph.nodes.get(consumer_id)
         if consumer is None or consumer.op_type not in ("BatchNormalization", "BatchNorm"):
+            continue
+
+        bn_outputs = [o for o in consumer.outputs if o]
+        if len(bn_outputs) != 1:
+            fusion_log.append({
+                "pattern": "FusedConv2dBatchNorm",
+                "status": "skipped",
+                "old_node_ids": [node_id, consumer_id],
+                "new_node_id": "",
+                "removed_tensors": [],
+                "rejection_reason": "BatchNormalization has observable auxiliary outputs",
+            })
             continue
 
         # Check that BN has all required parameters (5 inputs: x, scale, bias, mean, var)
@@ -301,6 +431,26 @@ def fuse_conv_batchnorm(graph: Graph, fusion_log: List[Dict[str, Any]]) -> int:
                 "rejection_reason": "BN parameters are not initializers/constants, cannot fold",
             })
             continue
+
+        weight = graph.tensors.get(node.inputs[1]) if len(node.inputs) > 1 else None
+        channels = weight.shape[0] if weight is not None and weight.shape else None
+        if channels is not None:
+            incompatible = []
+            for name in (scale, bias_bn, mean, var):
+                parameter = graph.tensors.get(name)
+                if (parameter is None or len(parameter.shape) != 1 or
+                        not _dim_compatible(parameter.shape[0], channels)):
+                    incompatible.append(name)
+            if incompatible:
+                fusion_log.append({
+                    "pattern": "FusedConv2dBatchNorm",
+                    "status": "skipped",
+                    "old_node_ids": [node_id, consumer_id],
+                    "new_node_id": "",
+                    "removed_tensors": [],
+                    "rejection_reason": "BN parameter shape does not match Conv channels",
+                })
+                continue
 
         # Check epsilon
         epsilon = consumer.attributes.get("epsilon", 1e-5)
@@ -341,7 +491,6 @@ def fuse_conv_batchnorm(graph: Graph, fusion_log: List[Dict[str, Any]]) -> int:
                 graph.set_producer(out_name, fused_id)
 
         # Reroute consumers
-        bn_outputs = [o for o in consumer.outputs if o]
         if bn_outputs:
             graph.reroute_consumers(bn_outputs[0], fused_node.outputs[0])
             for out_tensor in graph.outputs:
@@ -386,8 +535,9 @@ def _walk_elementwise_chain(graph: Graph, start_id: str,
     """
     chain = [start_id]
     current_id = start_id
+    graph_outputs = {tensor.name for tensor in graph.outputs}
 
-    while True:
+    while len(chain) < 5:
         current = graph.nodes.get(current_id)
         if current is None:
             break
@@ -395,6 +545,8 @@ def _walk_elementwise_chain(graph: Graph, start_id: str,
         if len(outputs) != 1:
             break
         out_tensor = outputs[0]
+        if out_tensor in graph_outputs:
+            break
         consumers = _get_consumers(graph, out_tensor)
         if len(consumers) != 1:
             break
@@ -429,17 +581,8 @@ def fuse_elementwise_chain(graph: Graph, fusion_log: List[Dict[str, Any]]) -> in
 
         # Walk forward to find the chain
         chain = _walk_elementwise_chain(graph, node_id, visited)
-        if len(chain) < 2 or len(chain) > 5:
+        if len(chain) < 2:
             visited.update(chain)
-            if len(chain) > 1:
-                fusion_log.append({
-                    "pattern": "FusedEWChain",
-                    "status": "skipped",
-                    "old_node_ids": list(chain),
-                    "new_node_id": "",
-                    "removed_tensors": [],
-                    "rejection_reason": f"Chain length {len(chain)} outside [2, 5] range",
-                })
             continue
 
         # Found a valid chain of 2-5 elementwise ops
@@ -567,6 +710,17 @@ def fuse_softmax_dropout(graph: Graph, fusion_log: List[Dict[str, Any]]) -> int:
             continue
         softmax_out = softmax_outputs[0]
 
+        if _is_graph_output(graph, softmax_out):
+            fusion_log.append({
+                "pattern": "FusedSoftmaxDropout",
+                "status": "skipped",
+                "old_node_ids": [node_id],
+                "new_node_id": "",
+                "removed_tensors": [],
+                "rejection_reason": "Softmax output is an observable graph output",
+            })
+            continue
+
         if not _has_single_consumer(graph, softmax_out):
             fusion_log.append({
                 "pattern": "FusedSoftmaxDropout",
@@ -581,6 +735,18 @@ def fuse_softmax_dropout(graph: Graph, fusion_log: List[Dict[str, Any]]) -> int:
         consumer_id = _get_consumers(graph, softmax_out)[0]
         consumer = graph.nodes.get(consumer_id)
         if consumer is None or consumer.op_type != "Dropout":
+            continue
+
+        dropout_outputs = [o for o in consumer.outputs if o]
+        if len(dropout_outputs) != 1:
+            fusion_log.append({
+                "pattern": "FusedSoftmaxDropout",
+                "status": "skipped",
+                "old_node_ids": [node_id, consumer_id],
+                "new_node_id": "",
+                "removed_tensors": [],
+                "rejection_reason": "Dropout mask output is observable",
+            })
             continue
 
         # Verify inference mode
@@ -679,7 +845,16 @@ def fuse_residual_norm(graph: Graph, fusion_log: List[Dict[str, Any]]) -> int:
 
         # Add must have two inputs (residual pattern)
         add_inputs = [i for i in node.inputs if i]
-        if len(add_inputs) < 2:
+        if len(add_inputs) != 2:
+            continue
+        if any(_is_initializer_or_constant(graph, name) for name in add_inputs):
+            continue
+        left = graph.tensors.get(add_inputs[0])
+        right = graph.tensors.get(add_inputs[1])
+        if (left is not None and right is not None and left.shape and right.shape and
+                (len(left.shape) != len(right.shape) or
+                 any(not _dim_compatible(a, b)
+                     for a, b in zip(left.shape, right.shape)))):
             continue
 
         # Add output must go to LayerNormalization
@@ -687,6 +862,17 @@ def fuse_residual_norm(graph: Graph, fusion_log: List[Dict[str, Any]]) -> int:
         if len(add_outputs) != 1:
             continue
         add_out = add_outputs[0]
+
+        if _is_graph_output(graph, add_out):
+            fusion_log.append({
+                "pattern": "FusedResidualNorm",
+                "status": "skipped",
+                "old_node_ids": [node_id],
+                "new_node_id": "",
+                "removed_tensors": [],
+                "rejection_reason": "Residual Add output is an observable graph output",
+            })
+            continue
 
         if not _has_single_consumer(graph, add_out):
             fusion_log.append({
@@ -704,14 +890,54 @@ def fuse_residual_norm(graph: Graph, fusion_log: List[Dict[str, Any]]) -> int:
         if consumer is None or consumer.op_type not in ("LayerNormalization", "LayerNorm"):
             continue
 
+        ln_outputs = [o for o in consumer.outputs if o]
+        if len(ln_outputs) != 1:
+            fusion_log.append({
+                "pattern": "FusedResidualNorm",
+                "status": "skipped",
+                "old_node_ids": [node_id, consumer_id],
+                "new_node_id": "",
+                "removed_tensors": [],
+                "rejection_reason": "LayerNormalization has observable auxiliary outputs",
+            })
+            continue
+
         # Check LayerNorm attributes
         axis = consumer.attributes.get("axis", -1)
         epsilon = consumer.attributes.get("epsilon", 1e-5)
+        try:
+            axis = int(axis)
+            epsilon = float(epsilon)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(epsilon) or epsilon <= 0.0:
+            continue
 
         # Check LayerNorm has scale/bias parameters
         ln_inputs = [i for i in consumer.inputs if i]
         ln_scale = ln_inputs[1] if len(ln_inputs) > 1 else ""
         ln_bias = ln_inputs[2] if len(ln_inputs) > 2 else ""
+        if not ln_scale:
+            continue
+        normalized = graph.tensors.get(add_out)
+        if normalized is not None and normalized.shape:
+            rank = len(normalized.shape)
+            normalized_axis = axis + rank if axis < 0 else axis
+            if normalized_axis < 0 or normalized_axis >= rank:
+                continue
+            expected_shape = list(normalized.shape[normalized_axis:])
+            parameters_valid = True
+            for parameter_name in (ln_scale, ln_bias):
+                if not parameter_name:
+                    continue
+                parameter = graph.tensors.get(parameter_name)
+                if (parameter is None or len(parameter.shape) != len(expected_shape) or
+                        any(not _dim_compatible(a, b)
+                            for a, b in zip(parameter.shape, expected_shape))):
+                    parameters_valid = False
+                    break
+            if not parameters_valid:
+                continue
 
         # Record and perform fusion
         fused_id = _generate_fused_node_id("FusedResidualNorm", node_id, consumer_id)
@@ -785,127 +1011,422 @@ def fuse_residual_norm(graph: Graph, fusion_log: List[Dict[str, Any]]) -> int:
     return fusions
 
 
-# ── Pattern F1f: FusedComputeActivation ─────────────────────────────
-
-# Compute op types whose output can be fused with an activation function.
-COMPUTE_OPS: Set[str] = {
-    "Gemm",
-    "MatMul",
-    "FusedMatMulBias",
-    "Conv",
-    "FusedConv2dBatchNorm",
-}
-
-# Activation op types eligible for compute fusion.
-ACTIVATION_OPS: Set[str] = {"Relu", "Erf"}
+# ── Executable released-model epilogues ─────────────────────────────
 
 
-def _is_compute_op(op_type: str) -> bool:
-    return op_type in COMPUTE_OPS
+def fuse_gemm_epilogues(graph: Graph,
+                        fusion_log: List[Dict[str, Any]]) -> int:
+    """Lower Gemm, optional producer Flatten, and optional Relu as one kernel.
 
-
-def _is_activation_op(op_type: str) -> bool:
-    return op_type in ACTIVATION_OPS
-
-
-def fuse_compute_activation(graph: Graph, fusion_log: List[Dict[str, Any]]) -> int:
-    """Fuse compute -> activation into FusedComputeActivation.
-
-    Covers Gemm/MatMul/Conv (and their already-fused variants) followed by a
-    single activation node (Relu, Erf).
-
-    This is the single highest-impact fusion for the released models:
-      - MLP:      Gemm -> Relu            (2 instances)
-      - ResNet:   Conv -> Relu            (up to 17 instances)
-      - Transformer: FusedMatMulBias -> Erf  (4 instances)
+    ONNX Gemm already contains its bias operand, so a MatMul->Add matcher cannot
+    optimize the released MLP.  This pass forms a semantic GEMM epilogue node
+    whose C3.5 implementation is one generated CUDA kernel.
     """
+    if not graph.node_order:
+        graph.topological_sort()
     fusions = 0
-    processed_nodes: Set[str] = set()
-
     for node_id in list(graph.node_order):
-        if node_id in processed_nodes:
+        gemm = graph.nodes.get(node_id)
+        if gemm is None or gemm.op_type != "Gemm":
             continue
-        node = graph.nodes.get(node_id)
-        if node is None or not _is_compute_op(node.op_type):
-            continue
-
-        compute_outputs = [o for o in node.outputs if o]
-        if len(compute_outputs) != 1:
-            continue
-        compute_out = compute_outputs[0]
-
-        if not _has_single_consumer(graph, compute_out):
+        if len([name for name in gemm.outputs if name]) != 1:
             continue
 
-        consumer_id = _get_consumers(graph, compute_out)[0]
-        consumer = graph.nodes.get(consumer_id)
-        if consumer is None or not _is_activation_op(consumer.op_type):
-            continue
+        old_ids: List[str] = []
+        fused_inputs = list(gemm.inputs)
+        attrs = dict(gemm.attributes)
 
-        # Activation output may be a graph output — still safe to fuse.
-        fused_id = _generate_fused_node_id(
-            "FusedComputeActivation", node.op_type, consumer.op_type, node_id
+        # Flatten is a pure reshape.  Absorb it only when its value has no
+        # other observer; the generated kernel reads the original contiguous
+        # input with the exact ONNX Flatten axis.
+        if fused_inputs:
+            producer_id = graph.tensor_producer.get(fused_inputs[0])
+            producer = graph.nodes.get(producer_id or "")
+            if (
+                producer is not None
+                and producer.op_type == "Flatten"
+                and len([name for name in producer.outputs if name]) == 1
+                and _has_single_consumer(graph, producer.outputs[0])
+                and not _is_graph_output(graph, producer.outputs[0])
+            ):
+                attrs["_flatten_axis"] = int(
+                    producer.attributes.get("axis", 1)
+                )
+                fused_inputs[0] = producer.inputs[0]
+                old_ids.append(producer.id)
+
+        old_ids.append(gemm.id)
+        final_node = gemm
+        output_name = next(name for name in gemm.outputs if name)
+        if not _is_graph_output(graph, output_name) and _has_single_consumer(
+            graph, output_name
+        ):
+            consumer_id = _get_consumers(graph, output_name)[0]
+            consumer = graph.nodes.get(consumer_id)
+            if (
+                consumer is not None
+                and consumer.op_type == "Relu"
+                and len([name for name in consumer.outputs if name]) == 1
+            ):
+                attrs["_activation"] = "Relu"
+                final_node = consumer
+                old_ids.append(consumer.id)
+
+        fused_id = _unique_fused_node_id(
+            graph, "FusedGemmEpilogue", old_ids[0], old_ids[-1]
         )
-
-        # Clear old activation output producer
-        for out_name in consumer.outputs:
-            if out_name:
-                graph.tensor_producer.pop(out_name, None)
-
-        attrs = dict(node.attributes)
-        attrs["_inner_op"] = node.op_type
-        attrs["_activation"] = consumer.op_type
-        attrs["_activation_attrs"] = dict(consumer.attributes)
-
         fused_node = Node(
             id=fused_id,
-            name=f"fused_compute_act_{node.op_type}_{consumer.op_type}_{node_id}",
-            op_type="FusedComputeActivation",
-            inputs=list(node.inputs),
-            outputs=list(consumer.outputs),
+            name=f"fused_gemm_epilogue_{gemm.id}",
+            op_type="FusedGemmEpilogue",
+            inputs=fused_inputs,
+            outputs=list(final_node.outputs),
             attributes=attrs,
+            domain=gemm.domain,
         )
-        graph.add_node(fused_node)
-
-        for out_name in fused_node.outputs:
-            if out_name:
-                if out_name not in graph.tensors:
-                    graph.register_tensor(name=out_name)
-                graph.set_producer(out_name, fused_id)
-
-        # Reroute consumers of the activation's output
-        act_outputs = [o for o in consumer.outputs if o]
-        if act_outputs:
-            graph.reroute_consumers(act_outputs[0], fused_node.outputs[0])
-            for out_tensor in graph.outputs:
-                if out_tensor.name == act_outputs[0]:
-                    out_tensor.name = fused_node.outputs[0]
-
-        removed_tensors = list(node.outputs) + list(consumer.outputs)
-        removed_tensors = [t for t in removed_tensors if t and t in graph.tensors]
-
-        graph.remove_node(consumer_id)
-        graph.remove_node(node_id)
-        processed_nodes.add(node_id)
-        processed_nodes.add(consumer_id)
-
-        fusions += 1
+        removed = _replace_region(graph, old_ids, fused_node)
         fusion_log.append({
-            "pattern": "FusedComputeActivation",
+            "pattern": "FusedGemmEpilogue",
             "status": "fused",
-            "old_node_ids": [node_id, consumer_id],
+            "old_node_ids": old_ids,
             "new_node_id": fused_id,
-            "removed_tensors": removed_tensors,
+            "removed_tensors": removed,
             "rejection_reason": "",
         })
+        fusions += 1
 
+    if fusions:
+        graph.topological_sort()
+    return fusions
+
+
+def _preferred_conv_for_add(graph: Graph, add: Node,
+                            order_index: Dict[str, int]) -> Optional[str]:
+    """Choose the latest Conv producer feeding a residual Add.
+
+    Transition blocks can feed Add from both a main-path Conv and a shortcut
+    Conv.  Selecting the latest producer is topology-driven and keeps the
+    longer main path in the fused epilogue without using node/model names.
+    """
+    candidates: List[str] = []
+    for input_name in add.inputs:
+        producer_id = graph.tensor_producer.get(input_name)
+        producer = graph.nodes.get(producer_id or "")
+        if producer is not None and producer.op_type == "Conv":
+            candidates.append(producer.id)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda node_id: order_index.get(node_id, -1))
+
+
+def fuse_conv_epilogues(graph: Graph,
+                        fusion_log: List[Dict[str, Any]]) -> int:
+    """Fuse Conv epilogue semantics around the BLAS Conv fallback.
+
+    The runtime currently lowers the contraction and generated epilogue as
+    multiple physical launches.  C3.2 decomposition preserves that distinction
+    until a faster single-launch H200 kernel is qualified.
+    """
+    if not graph.node_order:
+        graph.topological_sort()
+    order_index = {node_id: index for index, node_id in enumerate(graph.node_order)}
+    fusions = 0
+    for node_id in list(graph.node_order):
+        conv = graph.nodes.get(node_id)
+        if conv is None or conv.op_type != "Conv":
+            continue
+        outputs = [name for name in conv.outputs if name]
+        if len(outputs) != 1:
+            continue
+        conv_output = outputs[0]
+        if _is_graph_output(graph, conv_output) or not _has_single_consumer(
+            graph, conv_output
+        ):
+            continue
+        consumer_id = _get_consumers(graph, conv_output)[0]
+        consumer = graph.nodes.get(consumer_id)
+        if consumer is None:
+            continue
+
+        old_ids: List[str]
+        fused_inputs = list(conv.inputs)
+        attrs = dict(conv.attributes)
+        final_node: Optional[Node] = None
+        op_type = "FusedConvActivation"
+
+        if consumer.op_type == "Relu":
+            old_ids = [conv.id, consumer.id]
+            final_node = consumer
+            attrs["_activation"] = "Relu"
+        elif consumer.op_type == "Add" and len(consumer.inputs) == 2:
+            if _preferred_conv_for_add(graph, consumer, order_index) != conv.id:
+                continue
+            add_outputs = [name for name in consumer.outputs if name]
+            if (
+                len(add_outputs) != 1
+                or _is_graph_output(graph, add_outputs[0])
+                or not _has_single_consumer(graph, add_outputs[0])
+            ):
+                continue
+            relu_id = _get_consumers(graph, add_outputs[0])[0]
+            relu = graph.nodes.get(relu_id)
+            if relu is None or relu.op_type != "Relu":
+                continue
+            residual_name = (
+                consumer.inputs[1]
+                if consumer.inputs[0] == conv_output
+                else consumer.inputs[0]
+            )
+            conv_shape = list(graph.tensors.get(conv_output).shape)
+            residual_tensor = graph.tensors.get(residual_name)
+            if residual_tensor is None or not _shapes_maybe_equal(
+                conv_shape, list(residual_tensor.shape)
+            ):
+                continue
+            attrs["_activation"] = "Relu"
+            attrs["_residual_input_index"] = len(fused_inputs)
+            fused_inputs.append(residual_name)
+            old_ids = [conv.id, consumer.id, relu.id]
+            final_node = relu
+            op_type = "FusedConvResidualActivation"
+        else:
+            continue
+
+        fused_id = _unique_fused_node_id(
+            graph, op_type, old_ids[0], old_ids[-1]
+        )
+        fused_node = Node(
+            id=fused_id,
+            name=f"fused_conv_epilogue_{conv.id}",
+            op_type=op_type,
+            inputs=fused_inputs,
+            outputs=list(final_node.outputs),
+            attributes=attrs,
+            domain=conv.domain,
+        )
+        removed = _replace_region(graph, old_ids, fused_node)
+        fusion_log.append({
+            "pattern": op_type,
+            "status": "fused",
+            "old_node_ids": old_ids,
+            "new_node_id": fused_id,
+            "removed_tensors": removed,
+            "rejection_reason": "",
+        })
+        fusions += 1
+
+    if fusions:
+        graph.topological_sort()
+    return fusions
+
+
+def fuse_attention_scores(graph: Graph,
+                          fusion_log: List[Dict[str, Any]]) -> int:
+    """Fuse rank-4 MatMul->Div->Add(mask)->Softmax attention scores.
+
+    The generated kernel supports equal/broadcast batch-head dimensions,
+    scalar division, a NumPy-broadcastable rank-four mask, and last-axis
+    Softmax.  More general MatMul/Softmax forms remain unfused.
+    """
+    if not graph.node_order:
+        graph.topological_sort()
+    fusions = 0
+    for node_id in list(graph.node_order):
+        matmul = graph.nodes.get(node_id)
+        if matmul is None or matmul.op_type != "MatMul" or len(matmul.inputs) != 2:
+            continue
+        outputs = [name for name in matmul.outputs if name]
+        if len(outputs) != 1 or _is_graph_output(graph, outputs[0]):
+            continue
+        lhs = graph.tensors.get(matmul.inputs[0])
+        rhs = graph.tensors.get(matmul.inputs[1])
+        result_tensor = graph.tensors.get(outputs[0])
+        if (
+            lhs is None or rhs is None or result_tensor is None
+            or len(lhs.shape) != 4 or len(rhs.shape) != 4
+            or len(result_tensor.shape) != 4
+            or not _has_single_consumer(graph, outputs[0])
+        ):
+            continue
+
+        div = graph.nodes.get(_get_consumers(graph, outputs[0])[0])
+        if (
+            div is None or div.op_type != "Div" or len(div.inputs) != 2
+            or div.inputs[0] != outputs[0]
+            or len([name for name in div.outputs if name]) != 1
+        ):
+            continue
+        divisor = graph.tensors.get(div.inputs[1])
+        if divisor is None or len(divisor.shape) > 1:
+            continue
+        div_output = next(name for name in div.outputs if name)
+        if _is_graph_output(graph, div_output) or not _has_single_consumer(
+            graph, div_output
+        ):
+            continue
+
+        add = graph.nodes.get(_get_consumers(graph, div_output)[0])
+        if add is None or add.op_type != "Add" or len(add.inputs) != 2:
+            continue
+        mask_name = add.inputs[1] if add.inputs[0] == div_output else add.inputs[0]
+        mask = graph.tensors.get(mask_name)
+        add_outputs = [name for name in add.outputs if name]
+        if (
+            mask is None or len(mask.shape) > 4 or len(add_outputs) != 1
+            or _is_graph_output(graph, add_outputs[0])
+            or not _has_single_consumer(graph, add_outputs[0])
+        ):
+            continue
+
+        softmax = graph.nodes.get(_get_consumers(graph, add_outputs[0])[0])
+        if softmax is None or softmax.op_type != "Softmax":
+            continue
+        axis = int(softmax.attributes.get("axis", -1))
+        if axis not in (-1, 3):
+            continue
+
+        fused_id = _unique_fused_node_id(
+            graph, "FusedAttentionScores", matmul.id, softmax.id
+        )
+        fused_node = Node(
+            id=fused_id,
+            name=f"fused_attention_scores_{matmul.id}",
+            op_type="FusedAttentionScores",
+            inputs=[matmul.inputs[0], matmul.inputs[1], div.inputs[1], mask_name],
+            outputs=list(softmax.outputs),
+            attributes={"axis": -1},
+            domain=matmul.domain,
+        )
+        old_ids = [matmul.id, div.id, add.id, softmax.id]
+        removed = _replace_region(graph, old_ids, fused_node)
+        fusion_log.append({
+            "pattern": "FusedAttentionScores",
+            "status": "fused",
+            "old_node_ids": old_ids,
+            "new_node_id": fused_id,
+            "removed_tensors": removed,
+            "rejection_reason": "",
+        })
+        fusions += 1
+
+    if fusions:
+        graph.topological_sort()
+    return fusions
+
+
+def fuse_transpose_reshape(graph: Graph,
+                           fusion_log: List[Dict[str, Any]]) -> int:
+    """Fuse Transpose->Reshape into one layout-copy kernel.
+
+    The reshape does not change element order after the transpose; the fused
+    kernel writes the transposed contiguous order directly using the final
+    shape.  Rank is bounded to four because that is the executable kernel ABI.
+    """
+    if not graph.node_order:
+        graph.topological_sort()
+    fusions = 0
+    for node_id in list(graph.node_order):
+        transpose = graph.nodes.get(node_id)
+        if transpose is None or transpose.op_type != "Transpose":
+            continue
+        outputs = [name for name in transpose.outputs if name]
+        if (
+            len(outputs) != 1 or _is_graph_output(graph, outputs[0])
+            or not _has_single_consumer(graph, outputs[0])
+        ):
+            continue
+        input_tensor = graph.tensors.get(transpose.inputs[0])
+        if input_tensor is None or not 1 <= len(input_tensor.shape) <= 4:
+            continue
+        reshape = graph.nodes.get(_get_consumers(graph, outputs[0])[0])
+        if (
+            reshape is None or reshape.op_type != "Reshape"
+            or len(reshape.inputs) < 2
+            or len([name for name in reshape.outputs if name]) != 1
+        ):
+            continue
+        perm_attr = transpose.attributes.get("perm")
+        if perm_attr is None:
+            perm = list(range(len(input_tensor.shape) - 1, -1, -1))
+        else:
+            perm = [int(value) for value in perm_attr]
+        if sorted(perm) != list(range(len(input_tensor.shape))):
+            continue
+        fused_id = _unique_fused_node_id(
+            graph, "FusedTransposeReshape", transpose.id, reshape.id
+        )
+        fused_node = Node(
+            id=fused_id,
+            name=f"fused_transpose_reshape_{transpose.id}",
+            op_type="FusedTransposeReshape",
+            inputs=[transpose.inputs[0], reshape.inputs[1]],
+            outputs=list(reshape.outputs),
+            attributes={
+                "perm": perm,
+                "allowzero": int(reshape.attributes.get("allowzero", 0)),
+            },
+            domain=transpose.domain,
+        )
+        old_ids = [transpose.id, reshape.id]
+        removed = _replace_region(graph, old_ids, fused_node)
+        fusion_log.append({
+            "pattern": "FusedTransposeReshape",
+            "status": "fused",
+            "old_node_ids": old_ids,
+            "new_node_id": fused_id,
+            "removed_tensors": removed,
+            "rejection_reason": "",
+        })
+        fusions += 1
+    if fusions:
+        graph.topological_sort()
+    return fusions
+
+
+def fuse_layer_normalization_kernels(
+    graph: Graph, fusion_log: List[Dict[str, Any]]
+) -> int:
+    """Replace single-output LayerNormalization with one generated kernel."""
+    fusions = 0
+    for node_id in list(graph.node_order):
+        node = graph.nodes.get(node_id)
+        if (
+            node is None
+            or node.op_type not in {"LayerNormalization", "LayerNorm"}
+            or len([name for name in node.outputs if name]) != 1
+        ):
+            continue
+        fused_id = _unique_fused_node_id(
+            graph, "FusedLayerNormalization", node.id
+        )
+        fused_node = Node(
+            id=fused_id,
+            name=f"fused_layer_normalization_{node.id}",
+            op_type="FusedLayerNormalization",
+            inputs=list(node.inputs),
+            outputs=list(node.outputs),
+            attributes=dict(node.attributes),
+            domain=node.domain,
+        )
+        removed = _replace_region(graph, [node.id], fused_node)
+        fusion_log.append({
+            "pattern": "FusedLayerNormalization",
+            "status": "fused",
+            "old_node_ids": [node.id],
+            "new_node_id": fused_id,
+            "removed_tensors": removed,
+            "rejection_reason": "",
+        })
+        fusions += 1
+    if fusions:
+        graph.topological_sort()
     return fusions
 
 
 # ── Dead tensor cleanup ──────────────────────────────────────────────
 
 
-def cleanup_dead_tensors(graph: Graph, fusion_log: List[Dict[str, Any]]) -> int:
+def cleanup_dead_tensors(graph: Graph) -> int:
     """Remove tensors that are no longer produced or consumed by any node."""
     removed = 0
     tensor_names = list(graph.tensors.keys())

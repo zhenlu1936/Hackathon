@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 import tempfile
@@ -11,11 +10,13 @@ import unittest
 from pathlib import Path
 
 import cupy as cp
+import onnx
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MODELS_DIR = ROOT / "models"
-TESTDATA_DIR = ROOT / ".specification" / "testcases" / "release_to_competitors" / "testdata" / "c35"
+RELEASE_DIR = ROOT / ".specification" / "testcases" / "release_to_competitors"
+MODELS_DIR = RELEASE_DIR / "models"
+TESTDATA_DIR = RELEASE_DIR / "testdata" / "c35"
 
 
 class C35SpecificationTests(unittest.TestCase):
@@ -366,6 +367,199 @@ class C35OperatorTests(unittest.TestCase):
         x = cp.random.randn(1, 64, 1, 1).astype(cp.float32)
         out = op_flatten([x], {"axis": 1})
         self.assertEqual(out.shape, (1, 64))
+
+
+class C35Opset17AttributeTests(unittest.TestCase):
+    """Non-default attributes and valid hidden-style shapes for all 17 ops."""
+
+    def test_flatten_nondefault_axis_is_always_rank_two(self) -> None:
+        from c35.engine import op_flatten
+
+        x = cp.arange(120, dtype=cp.float32).reshape(2, 3, 4, 5)
+        self.assertEqual(op_flatten([x], {"axis": 2}).shape, (6, 20))
+        self.assertEqual(op_flatten([x], {"axis": 0}).shape, (1, 120))
+        self.assertEqual(op_flatten([x], {"axis": -1}).shape, (24, 5))
+
+    def test_gemm_transpose_a_alpha_beta_and_broadcast_bias(self) -> None:
+        from c35.engine import op_gemm
+
+        a = cp.arange(6, dtype=cp.float32).reshape(3, 2)
+        b = cp.arange(12, dtype=cp.float32).reshape(3, 4)
+        c = cp.linspace(-1.0, 1.0, 4, dtype=cp.float32)
+        actual = op_gemm(
+            [a, b, c],
+            {"transA": 1, "alpha": 0.5, "beta": 2.0},
+        )
+        expected = cp.float32(0.5) * (a.T @ b) + cp.float32(2.0) * c
+        cp.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-6)
+
+    def test_relu_accepts_non_matrix_shape(self) -> None:
+        from c35.engine import op_relu
+
+        x = cp.linspace(-2.0, 2.0, 24, dtype=cp.float32).reshape(2, 3, 4)
+        cp.testing.assert_array_equal(op_relu([x], {}), cp.maximum(x, 0))
+
+    def test_conv_dilation_same_lower_and_group(self) -> None:
+        from c35.engine import op_conv
+
+        x = cp.arange(30, dtype=cp.float32).reshape(1, 1, 5, 6)
+        w = cp.array([[[[1.0, 2.0], [3.0, 4.0]]]], dtype=cp.float32)
+        actual = op_conv([x, w], {
+            "auto_pad": "SAME_LOWER",
+            "strides": [2, 2],
+            "dilations": [2, 2],
+            "group": 1,
+        })
+        padded = cp.pad(x, ((0, 0), (0, 0), (1, 1), (1, 0)))
+        expected = (
+            padded[:, :, 0:6:2, 0:6:2] * w[0, 0, 0, 0]
+            + padded[:, :, 0:6:2, 2:8:2] * w[0, 0, 0, 1]
+            + padded[:, :, 2:8:2, 0:6:2] * w[0, 0, 1, 0]
+            + padded[:, :, 2:8:2, 2:8:2] * w[0, 0, 1, 1]
+        )
+        cp.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-6)
+
+        grouped_x = cp.arange(18, dtype=cp.float32).reshape(1, 2, 3, 3)
+        grouped_w = cp.array([[[[2.0]]], [[[3.0]]]], dtype=cp.float32)
+        grouped = op_conv([grouped_x, grouped_w], {"group": 2})
+        cp.testing.assert_array_equal(grouped[:, 0], grouped_x[:, 0] * 2.0)
+        cp.testing.assert_array_equal(grouped[:, 1], grouped_x[:, 1] * 3.0)
+
+    def test_add_broadcasts_higher_rank(self) -> None:
+        from c35.engine import op_add
+
+        x = cp.arange(24, dtype=cp.float32).reshape(2, 3, 4)
+        bias = cp.array([1.0, -1.0, 2.0, -2.0], dtype=cp.float32)
+        cp.testing.assert_array_equal(op_add([x, bias], {}), x + bias)
+
+    def test_global_average_pool_supports_extra_spatial_rank(self) -> None:
+        from c35.engine import op_global_average_pool
+
+        x = cp.arange(2 * 3 * 4 * 5 * 6, dtype=cp.float32).reshape(2, 3, 4, 5, 6)
+        actual = op_global_average_pool([x], {})
+        self.assertEqual(actual.shape, (2, 3, 1, 1, 1))
+        cp.testing.assert_allclose(actual, x.mean(axis=(2, 3, 4), keepdims=True))
+
+    def test_gather_negative_axis_preserves_data_dtype(self) -> None:
+        from c35.engine import op_gather
+
+        data = cp.arange(24, dtype=cp.int64).reshape(2, 3, 4)
+        indices = cp.array([[3, 1], [0, 2]], dtype=cp.int64)
+        actual = op_gather([data, indices], {"axis": -1})
+        expected = cp.take(data, indices, axis=2)
+        self.assertEqual(actual.dtype, cp.int64)
+        cp.testing.assert_array_equal(actual, expected)
+
+    def test_layer_norm_axis_one_and_optional_outputs(self) -> None:
+        from c35.engine import op_layer_normalization
+
+        x = cp.arange(24, dtype=cp.float32).reshape(2, 3, 4)
+        scale = cp.linspace(0.5, 1.5, 12, dtype=cp.float32).reshape(3, 4)
+        bias = cp.linspace(-0.2, 0.2, 12, dtype=cp.float32).reshape(3, 4)
+        y, mean, inv_std = op_layer_normalization(
+            [x, scale, bias],
+            {"axis": 1, "epsilon": 1e-3, "_num_outputs": 3},
+        )
+        expected_mean = x.mean(axis=(1, 2), keepdims=True)
+        centered = x - expected_mean
+        expected_inv_std = 1.0 / cp.sqrt(
+            cp.mean(centered * centered, axis=(1, 2), keepdims=True) + 1e-3
+        )
+        expected_y = centered * expected_inv_std * scale + bias
+        cp.testing.assert_allclose(y, expected_y, rtol=1e-5, atol=1e-5)
+        cp.testing.assert_allclose(mean, expected_mean, rtol=1e-6, atol=1e-6)
+        cp.testing.assert_allclose(inv_std, expected_inv_std, rtol=1e-6, atol=1e-6)
+
+    def test_matmul_broadcasts_batch_dimensions(self) -> None:
+        from c35.engine import op_matmul
+
+        a = cp.arange(2 * 1 * 3 * 4, dtype=cp.float32).reshape(2, 1, 3, 4)
+        b = cp.arange(5 * 4 * 2, dtype=cp.float32).reshape(1, 5, 4, 2)
+        cp.testing.assert_allclose(op_matmul([a, b], {}), cp.matmul(a, b))
+
+    def test_constant_tensor_and_scalar_attributes_are_loaded(self) -> None:
+        from c35.executor import _extract_constant_values
+
+        tensor = onnx.numpy_helper.from_array(
+            cp.asnumpy(cp.arange(6, dtype=cp.float32).reshape(2, 3)),
+            name="constant_value",
+        )
+        graph = onnx.helper.make_graph(
+            [
+                onnx.helper.make_node("Constant", [], ["tensor_out"], value=tensor),
+                onnx.helper.make_node("Constant", [], ["scalar_out"], value_int=7),
+                onnx.helper.make_node(
+                    "Constant", [], ["float_vector_out"],
+                    value_floats=[0.25, -0.5],
+                ),
+            ],
+            "constants",
+            [],
+            [],
+        )
+        model = onnx.helper.make_model(graph, opset_imports=[onnx.helper.make_opsetid("", 17)])
+        with tempfile.TemporaryDirectory(prefix="c35-constant-") as temp:
+            path = Path(temp) / "constants.onnx"
+            onnx.save(model, path)
+            values = _extract_constant_values(str(path))
+        cp.testing.assert_array_equal(
+            values["tensor_out"], cp.arange(6, dtype=cp.float32).reshape(2, 3)
+        )
+        self.assertEqual(values["scalar_out"].dtype, cp.int64)
+        self.assertEqual(int(values["scalar_out"].item()), 7)
+        self.assertEqual(values["float_vector_out"].dtype, cp.float32)
+        cp.testing.assert_array_equal(
+            values["float_vector_out"], cp.array([0.25, -0.5], dtype=cp.float32)
+        )
+
+    def test_split_uses_opset17_sizes_input(self) -> None:
+        from c35.engine import op_split
+
+        x = cp.arange(24, dtype=cp.float32).reshape(2, 12)
+        sizes = cp.array([2, 4, 6], dtype=cp.int64)
+        parts = op_split([x, sizes], {"axis": -1, "_num_outputs": 3})
+        self.assertEqual([part.shape for part in parts], [(2, 2), (2, 4), (2, 6)])
+        cp.testing.assert_array_equal(cp.concatenate(parts, axis=-1), x)
+
+    def test_reshape_zero_copies_input_dimension(self) -> None:
+        from c35.engine import op_reshape
+
+        x = cp.arange(24, dtype=cp.float32).reshape(2, 3, 4)
+        shape = cp.array([0, -1], dtype=cp.int64)
+        actual = op_reshape([x, shape], {"allowzero": 0})
+        self.assertEqual(actual.shape, (2, 12))
+        cp.testing.assert_array_equal(actual.reshape(x.shape), x)
+
+    def test_transpose_default_reverses_axes(self) -> None:
+        from c35.engine import op_transpose
+
+        x = cp.arange(24, dtype=cp.float32).reshape(2, 3, 4)
+        cp.testing.assert_array_equal(op_transpose([x], {}), cp.transpose(x, (2, 1, 0)))
+
+    def test_div_broadcasts_non_scalar_denominator(self) -> None:
+        from c35.engine import op_div
+
+        x = cp.arange(1, 13, dtype=cp.float32).reshape(3, 4)
+        denominator = cp.array([1.0, 2.0, 4.0, 8.0], dtype=cp.float32)
+        cp.testing.assert_allclose(op_div([x, denominator], {}), x / denominator)
+
+    def test_softmax_nonlast_axis(self) -> None:
+        from c35.engine import op_softmax
+
+        x = cp.arange(24, dtype=cp.float32).reshape(2, 3, 4)
+        actual = op_softmax([x], {"axis": 1})
+        cp.testing.assert_allclose(actual.sum(axis=1), cp.ones((2, 4)), atol=1e-6)
+
+    def test_erf_and_mul_hidden_style_broadcast(self) -> None:
+        from c35.engine import op_erf, op_mul
+
+        x = cp.linspace(-3.0, 3.0, 24, dtype=cp.float32).reshape(2, 3, 4)
+        erf_out = op_erf([x], {})
+        self.assertEqual(erf_out.shape, x.shape)
+        self.assertTrue(bool(cp.all(erf_out <= 1.0).item()))
+        self.assertTrue(bool(cp.all(erf_out >= -1.0).item()))
+        scale = cp.array([0.5, 1.0, 1.5, 2.0], dtype=cp.float32)
+        cp.testing.assert_allclose(op_mul([erf_out, scale], {}), erf_out * scale)
 
 
 class C35RunnerEvidenceTests(unittest.TestCase):

@@ -50,9 +50,31 @@ def _set_hardware_with_refresh(hw: HardwareCapability) -> None:
 set_hardware = _set_hardware_with_refresh  # type: ignore[assignment]
 
 
+def activate_cupy_hardware(
+    device_id: int | None = None,
+    *,
+    supports_fp4: bool | None = None,
+    supports_winograd: bool = True,
+) -> HardwareCapability:
+    """Query and activate the visible CUDA device capability snapshot.
+
+    ``supports_fp4`` should be set only when an executable AEC FP4/W4A16 path
+    has been independently qualified; Hopper discovery is conservative by
+    default and therefore does not claim native FP4.
+    """
+    discovered = HardwareCapability.query_cupy_device(
+        device_id,
+        supports_fp4=supports_fp4,
+        supports_winograd=supports_winograd,
+    )
+    set_hardware(discovered)
+    return get_hardware()
+
+
 __all__ = [
     "import_onnx_graph", "strategy", "hardware",
     "Strategy", "ExecutionMode", "HardwareCapability",
     "KernelSpecRef", "KernelTuningParams", "PrecisionProfile",
     "set_hardware", "get_hardware",
+    "activate_cupy_hardware",
 ]
