@@ -27,6 +27,8 @@ SENSITIVE_OPS: Set[str] = {
     "Softmax", "LogSoftmax", "LayerNorm", "LayerNormalization",
     "BatchNorm", "BatchNormalization",
     "ReduceMax", "ReduceSum", "ReduceMean",
+    "FusedAttentionScores", "FusedLayerNormalization",
+    "FusedResidualNorm", "FusedSoftmaxDropout",
 }
 
 TUMABLE_OPS: Set[str] = {"MatMul", "Linear", "Gemm", "Conv", "Conv2d"}
@@ -41,10 +43,8 @@ SAFE_FALLBACKS: Dict[str, List[str]] = {
     "fp32": ["fp32"],
 }
 
-TUMABLE_KERNEL_PREFIXES: Set[str] = {
-    "matmul_", "winograd_forward_", "im2col_", "add_bias_",
-    "add_", "mul_", "div_", "reduce_max", "reduce_sum", "reduce_mean",
-    "exp", "sub_", "sqrt", "erf_", "relu_",
+METADATA_KERNELS: Set[str] = {
+    "constant", "flatten", "reshape", "transpose", "split", "gather",
 }
 
 
@@ -177,18 +177,86 @@ class Strategy:
                   precision: Optional[PrecisionProfile] = None) -> List[KernelSpecRef]:
         if precision is None:
             precision = self.select_precision(node, graph)
+        if precision.compute_dtype not in self.hardware.supported_precisions():
+            raise ValueError(
+                f"Node '{node.id}' requested unsupported precision "
+                f"'{precision.compute_dtype}'"
+            )
+        if node.op_type in SENSITIVE_OPS and precision.compute_dtype != "fp32":
+            raise ValueError(
+                f"Sensitive operator '{node.op_type}' must decompose in fp32"
+            )
         op = node.op_type
         decomposer = DECOMPOSE_DISPATCH.get(op)
         if decomposer is None:
-            return [KernelSpecRef(
+            kernels = [KernelSpecRef(
                 kernel_name=f"{op.lower()}_{precision.compute_dtype}",
                 inputs=list(node.inputs), outputs=list(node.outputs),
                 operator_params=dict(node.attributes),
             )]
-        if op == "Conv":
+        elif op in {"Conv", "Conv2d"}:
             use_winograd = "winograd" in self.hardware.conv_strategies_available()
-            return decomposer(node, graph, precision, use_winograd=use_winograd)
-        return decomposer(node, graph, precision)
+            kernels = decomposer(
+                node, graph, precision, use_winograd=use_winograd,
+            )
+        else:
+            kernels = decomposer(node, graph, precision)
+
+        for kernel in kernels:
+            kernel.precision_profile = precision
+        self.validate_decomposition(node, kernels)
+        return kernels
+
+    @staticmethod
+    def validate_decomposition(
+        node: Node, kernels: List[KernelSpecRef]
+    ) -> None:
+        """Validate connectivity and output completeness of a lowering.
+
+        This catches string-only plans whose intermediates are misspelled,
+        consumed before production, produced twice, or never connect back to
+        the high-level node outputs.
+        """
+        if not kernels:
+            raise ValueError(f"Node '{node.id}' decomposed to an empty sequence")
+
+        available = {name for name in node.inputs if name}
+        produced: Set[str] = set()
+        for index, kernel in enumerate(kernels):
+            if not kernel.kernel_name:
+                raise ValueError(
+                    f"Node '{node.id}' kernel {index} has an empty name"
+                )
+            missing = [
+                name for name in kernel.inputs
+                if name and name not in available
+            ]
+            if missing:
+                raise ValueError(
+                    f"Node '{node.id}' kernel '{kernel.kernel_name}' consumes "
+                    f"unresolved tensors {missing}"
+                )
+            outputs = [name for name in kernel.outputs if name]
+            if not outputs:
+                raise ValueError(
+                    f"Node '{node.id}' kernel '{kernel.kernel_name}' has no output"
+                )
+            duplicates = [name for name in outputs if name in produced]
+            if duplicates:
+                raise ValueError(
+                    f"Node '{node.id}' produces tensors more than once: {duplicates}"
+                )
+            produced.update(outputs)
+            available.update(outputs)
+
+        missing_outputs = [
+            name for name in node.outputs if name and name not in produced
+        ]
+        if missing_outputs:
+            raise ValueError(
+                f"Node '{node.id}' lowering does not produce outputs "
+                f"{missing_outputs}"
+            )
 
     # ── D4: Kernel tuning (with hardware-limit clamping) ──
 
@@ -208,75 +276,86 @@ class Strategy:
             ps = problem_size or {}
         max_threads = self.hardware.max_threads_per_block
         max_smem = self.hardware.smem_bytes
+        max_block_x = min(max_threads, self.hardware.max_block_dim)
+        max_grid_x = self.hardware.max_grid_dim
         name = ref.kernel_name
 
         if name.startswith("matmul_"):
             m, n, k = ps.get("m", 1024), ps.get("n", 1024), ps.get("k", 1024)
-            bx = min(128, max_threads)
+            bx = min(128, max_block_x)
             by = min(8, max(1, max_threads // max(1, bx)))
-            smem = k * 4 + 1024
-            if smem > max_smem:
-                smem = -1  # mark as infeasible
+            # Shared memory is sized by the resident K tile, not the complete
+            # problem K dimension.  This keeps valid large problems launchable.
+            dtype_bytes = 2 if precision.input_dtype in {"fp16", "bf16"} else 4
+            tile_k = min(max(1, k), 32)
+            smem = (bx + by) * tile_k * dtype_bytes
             return KernelTuningParams(
                 block_x=bx, block_y=by,
-                grid_x=max(1, _ceil_div(n, bx)),
-                grid_y=max(1, _ceil_div(m, by)),
+                grid_x=_clamp_grid(_ceil_div(max(1, n), bx), max_grid_x),
+                grid_y=_clamp_grid(_ceil_div(max(1, m), by), max_grid_x),
                 smem_bytes=_clamp_smem(smem, max_smem),
             )
 
         if name.startswith("winograd_forward_"):
-            bx = min(256, max_threads)
+            bx = min(256, max_block_x)
             smem = ps.get("smem", 16384)
             return KernelTuningParams(
                 block_x=bx,
-                grid_x=max(1, ps.get("out_channels", 64)),
+                grid_x=_clamp_grid(max(1, ps.get("out_channels", 64)), max_grid_x),
                 smem_bytes=_clamp_smem(smem, max_smem),
             )
 
         if name.startswith("im2col_"):
-            bx = min(256, max_threads)
+            bx = min(256, max_block_x)
             return KernelTuningParams(
                 block_x=bx,
-                grid_x=max(1, _ceil_div(ps.get("num_tiles", 4096), bx)),
+                grid_x=_clamp_grid(
+                    _ceil_div(max(1, ps.get("num_tiles", 4096)), bx),
+                    max_grid_x,
+                ),
             )
 
         if name.startswith(("reduce_", "exp", "sqrt")):
             elements = ps.get("elements", 1024)
-            bx = min(256, max_threads)
+            bx = min(256, max_block_x)
             return KernelTuningParams(
                 block_x=bx,
-                grid_x=max(1, _ceil_div(elements, bx)),
+                grid_x=_clamp_grid(_ceil_div(max(1, elements), bx), max_grid_x),
             )
 
         if any(name.startswith(p) for p in ("add_", "mul_", "div_", "sub_", "relu_", "erf_", "add_bias_")):
             elements = ps.get("elements", 1024)
-            bx = min(256, max_threads)
+            bx = min(256, max_block_x)
             return KernelTuningParams(
                 block_x=bx,
-                grid_x=max(1, _ceil_div(elements, bx)),
+                grid_x=_clamp_grid(_ceil_div(max(1, elements), bx), max_grid_x),
             )
 
         if name in ("reshape", "transpose", "flatten", "split", "gather", "constant", "squeeze"):
             elements = ps.get("elements", 1024)
-            bx = min(128, max_threads)
-            return KernelTuningParams(block_x=bx, grid_x=max(1, _ceil_div(elements, bx)))
+            bx = min(128, max_block_x)
+            return KernelTuningParams(
+                block_x=bx,
+                grid_x=_clamp_grid(_ceil_div(max(1, elements), bx), max_grid_x),
+            )
 
-        return KernelTuningParams(block_x=min(128, max_threads), grid_x=1)
+        return KernelTuningParams(block_x=min(128, max_block_x), grid_x=1)
 
     def process_graph(self, graph: Graph) -> Dict[str, Any]:
+        if not graph.node_order:
+            graph.topological_sort()
         results = {}
         for nid in graph.node_order:
             node = graph.nodes[nid]
             precision = self.select_precision(node, graph)
             kernels = self.decompose(node, graph, precision)
             for krn in kernels:
-                if krn.is_tunable or self._is_kernel_tunable(krn.kernel_name):
-                    krn.tuning_params = self.tune_kernel(krn, precision)
+                krn.tuning_params = self.tune_kernel(krn, precision)
             results[nid] = {"node": node, "precision": precision, "kernels": kernels}
         return results
 
     def _is_kernel_tunable(self, name: str) -> bool:
-        return any(name.startswith(p) for p in TUMABLE_KERNEL_PREFIXES)
+        return name not in METADATA_KERNELS
 
 
 def _ceil_div(a: int, b: int) -> int:
@@ -320,3 +399,8 @@ def _clamp_smem(smem_bytes: int, max_smem: int) -> int:
     if smem_bytes > max_smem:
         return -1
     return smem_bytes
+
+
+def _clamp_grid(grid: int, max_grid: int) -> int:
+    """Clamp grid-x for kernels implemented with grid-stride loops."""
+    return min(max(1, int(grid)), max_grid)

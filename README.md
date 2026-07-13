@@ -89,9 +89,11 @@ child process's CuPy memory-pool high-water proxy and labels the source
 
 ```bash
 python3 -m unittest -q c31.test_c31
+python3 -m unittest -v c32.test_contract
 python3 -m c32.test_c32
 python3 -m c33.test_c33
 python3 -m c34.test_c34
+python3 -m unittest -v c34.test_executable_plan
 python3 -m unittest -v c35.test_c35 c35.test_cross_stage
 python3 -m unittest -v c3common.test_scoring_regressions
 ```
@@ -108,14 +110,18 @@ submission gates.
 - C3.2 exposes deterministic public precision, decomposition, and tuning APIs.
 - C3.3 implements the five requested fusion patterns with transactional graph
   validation and machine-readable logs.
-- C3.4 emits reviewable allocation, lifetime, transfer, event, and stream plans.
-- C3.5 runs the connected optimized graph through CuPy; the revised CuPy-only
-  path passes the three-model H200 black-box correctness and accuracy gates.
+- C3.4 emits and executes a unified allocation, transfer, event, kernel, free,
+  and readback timeline over a planned CuPy arena.
+- C3.5 runs the connected optimized graph through CuPy. The prior high-level
+  graph path passed the three-model H200 black-box correctness and accuracy
+  gates; the source-connected C3.4 timeline revision still needs the same
+  target rerun.
 
-The framework executes inference on the designated H200 AEC device. The primary
-remaining integration boundary is that C3.2 kernel references and C3.4 planned
-allocations, transfers, streams, and events do not yet directly drive the CuPy
-launch path. Additional evaluator ambiguities and scoring limitations are
+The framework executes inference on the designated H200 AEC device. C3.4's
+arena, allocation views, transfers, streams, and events now drive the CuPy
+runtime in source; that exact revision still needs target validation. The
+primary architectural boundary is direct execution of individual C3.2 kernel
+references. Additional evaluator ambiguities and scoring limitations are
 tracked in [remaining problems](docs/remaining-problems.md).
 
 ## Documentation and governing contracts
@@ -153,9 +159,9 @@ unreleased evaluator details are tracked in
 
 The DAG JSON is an export view of the shared IR, not a replacement for tensor
 metadata, attributes, producer/consumer maps, or initializer state. The current
-CuPy/CUDA path executes released models on the remote H200 AEC device, but C3.2
-kernel references and C3.4 allocation/stream/event plans remain structural
-until they directly drive device operations.
+CuPy/CUDA path executes released models on the remote H200 AEC device. C3.4
+plans now drive the source runtime, while direct C3.2 kernel-reference
+execution and target qualification of the revised C3.4 path remain open.
 
 ## Submission checklist and command templates
 
@@ -221,7 +227,7 @@ packages native to the published evaluation environment.
 | `torch` | `import torch; torch.__version__` | `.specification/environments.txt` | BSD-3-Clause | Available but not used at runtime | none |
 
 Standard-library modules used include `argparse`, `base64`, `copy`,
-`dataclasses`, `json`, `math`, `os`, `pathlib`, `shlex`, `shutil`, `signal`,
+`dataclasses`, `hashlib`, `json`, `math`, `os`, `pathlib`, `shlex`, `shutil`, `signal`,
 `subprocess`, `sys`, `tempfile`, `threading`, `time`, `typing`, and `unittest`.
 
 CuPy 14.1.1 was confirmed on the remote H200 MIG validation environment. ONNX

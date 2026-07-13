@@ -75,11 +75,46 @@ The released `ExecutionPlan` exposes:
 
 ## Released planning path
 
-The released scheduler creates explicit allocations and weight uploads,
+The released scheduler creates explicit arena ranges and weight uploads,
 model-lifetime weight residency, intermediate lifetime reuse, a managed pool,
 copy-stream readiness events, and dependency-aware compute-stream assignments.
-These are connected plan artifacts, but they do not yet directly drive the
-CuPy operations executed on the AEC H200.
+Tensor byte sizes are concretized from both dynamic shape metadata and ONNX
+dtype width; in particular, dynamic INT64 graph inputs reserve eight bytes per
+element rather than inheriting the four-byte FP32 default.
+It lowers these records into one ordered `ALLOC`/`H2D`/`EVENT_WAIT`/`KERNEL`/
+`EVENT_RECORD`/`FREE`/`D2H` timeline. `PlannedGraphExecutor` consumes that
+timeline using one CuPy byte arena, typed allocation views, non-blocking CuPy
+streams, CuPy events, and pinned asynchronous copies.
+
+Device arenas are cached per execution plan. The first planned upload also
+becomes the executor-lifetime resident weight/constant view; later invocations
+bind it directly or copy it device-to-device into a different batch plan's
+arena, then record fresh readiness events without another host upload. Inputs,
+intermediates, outputs, and synchronization remain per run.
+
+Physical CuPy stream objects are cached by logical stream ID for the executor
+lifetime instead of being recreated for every input batch. Plan events are
+also cached and reused only after all participating streams synchronize. This
+preserves the plan's logical stream/event contract while allowing CuPy's
+stream-specific memory-pool arenas to reuse temporary blocks across batches.
+The executor records a bounded per-batch trace of planned arena size plus CuPy
+pool used/reserved bytes and reports the number of physical stream/event
+objects created.
+
+Cross-stream dataflow edges and reused physical byte ranges receive explicit
+happens-before events. Weight transfers are staged before their first use so a
+next-layer copy can overlap earlier compute. The runtime also records every
+consumed action, allowing target validation to compare the trace with the
+submitted plan.
+
+The executable unit is currently one optimized graph node. Its C3.2
+decomposition remains attached as review metadata; direct execution of the
+individual C3.2 kernel references is a separate open integration item. Some
+high-level CuPy operators still produce temporary arrays before their results
+are copied into planned arena views. The real fused Softmax+Dropout and
+Residual+LayerNorm kernels write directly into their planned arena views, and
+the generic path no longer materializes an extra contiguous copy solely for
+arena transfer. Target-side actual-peak measurement is still required.
 
 ## Validation evidence
 
@@ -89,3 +124,7 @@ CuPy operations executed on the AEC H200.
 - Timeline showing at least one prefetch overlapping earlier compute.
 - Timeline showing independent kernels on different compute streams with dependencies respected.
 - Numerical output unchanged from the single-stream, no-reuse FP32 baseline.
+
+Local structural evidence is `387/387` C3.4 checks plus `6/6` executable-plan
+regressions. Closure of the target-runtime items requires rerunning the
+cross-stage numerical suite and the three released models on CuPy 14.1.1/H200.

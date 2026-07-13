@@ -14,28 +14,29 @@ from typing import Any, Dict, List, Optional, Tuple
 import cupy as cp
 import onnx
 
-from c3common.ir.graph import Graph, Node
+from c3common.ir.graph import Graph, Node, ONNSType
 from c34.execution_plan import ExecutionPlan
 from c35 import engine
 
 
-def _extract_initializer_data(model_path: str) -> Dict[str, cp.ndarray]:
-    """Extract ONNX initializer tensors and move them directly to CuPy.
+def _extract_initializer_data(model_path: str) -> Dict[str, Any]:
+    """Extract ONNX initializer tensors as host arrays.
 
     Args:
         model_path: Path to the .onnx file.
 
     Returns:
-        Dict mapping initializer name to a CuPy array.
+        Dict mapping initializer name to a host array. Each executor decides
+        whether upload is eager or driven by the C3.4 transfer timeline.
     """
     model = onnx.load(model_path)
-    weights: Dict[str, cp.ndarray] = {}
+    weights: Dict[str, Any] = {}
     for init in model.graph.initializer:
-        weights[init.name] = cp.asarray(onnx.numpy_helper.to_array(init))
+        weights[init.name] = onnx.numpy_helper.to_array(init)
     return weights
 
 
-def _extract_constant_values(model_path: str) -> Dict[str, cp.ndarray]:
+def _extract_constant_values(model_path: str) -> Dict[str, Any]:
     """Extract constant tensor values from ONNX Constant nodes.
 
     Constant nodes store their value as the 'value' attribute.
@@ -45,27 +46,44 @@ def _extract_constant_values(model_path: str) -> Dict[str, cp.ndarray]:
         model_path: Path to the .onnx file.
 
     Returns:
-        Dict mapping constant output tensor name to a CuPy array.
+        Dict mapping constant output tensor name to its host value.
     """
     model = onnx.load(model_path)
-    constants: Dict[str, cp.ndarray] = {}
+    constants: Dict[str, Any] = {}
     for node in model.graph.node:
-        if node.op_type == "Constant":
-            for attr in node.attribute:
-                if attr.name == "value" and attr.t.data_type:
-                    arr = cp.asarray(onnx.numpy_helper.to_array(attr.t))
-                    for out_name in node.output:
-                        constants[out_name] = arr
-                    break
-            # Also handle value_float / value_int attributes
-            if not any(out in constants for out in node.output):
-                for attr in node.attribute:
-                    if attr.name == "value_float":
-                        for out_name in node.output:
-                            constants[out_name] = cp.array(attr.f, dtype=cp.float32)
-                    elif attr.name == "value_int":
-                        for out_name in node.output:
-                            constants[out_name] = cp.array(attr.i, dtype=cp.int64)
+        if node.op_type != "Constant":
+            continue
+        supported = {
+            "value", "value_float", "value_floats", "value_int", "value_ints",
+        }
+        values = [attr for attr in node.attribute if attr.name in supported]
+        if len(values) != 1:
+            raise ValueError(
+                f"Constant node {node.name!r} must contain exactly one supported "
+                f"numeric value attribute, found {[attr.name for attr in values]}"
+            )
+        attr = values[0]
+        if attr.name == "value":
+            value = onnx.numpy_helper.to_array(attr.t)
+        elif attr.name == "value_float":
+            value = onnx.numpy_helper.to_array(onnx.helper.make_tensor(
+                "", onnx.TensorProto.FLOAT, [], [attr.f]
+            ))
+        elif attr.name == "value_floats":
+            value = onnx.numpy_helper.to_array(onnx.helper.make_tensor(
+                "", onnx.TensorProto.FLOAT, [len(attr.floats)], attr.floats
+            ))
+        elif attr.name == "value_int":
+            value = onnx.numpy_helper.to_array(onnx.helper.make_tensor(
+                "", onnx.TensorProto.INT64, [], [attr.i]
+            ))
+        else:
+            value = onnx.numpy_helper.to_array(onnx.helper.make_tensor(
+                "", onnx.TensorProto.INT64, [len(attr.ints)], attr.ints
+            ))
+        for out_name in node.output:
+            if out_name:
+                constants[out_name] = value
     return constants
 
 
@@ -98,7 +116,106 @@ class GraphExecutor:
             name: engine.to_device(value)
             for name, value in _extract_constant_values(model_path).items()
         }
+        self._materialize_conv_batchnorm_folds()
         self.values: Dict[str, Any] = {}
+
+    def _materialize_conv_batchnorm_folds(self) -> None:
+        """Fold explicit Conv+BN parameters once on the device.
+
+        The C3.1 graph intentionally stores tensor metadata rather than host
+        numerical arrays.  The executor is the first stage with the model's
+        CuPy initializer store, so it materializes the standard inference fold
+        here before C3.4 builds its plan.  The resulting fused node consumes a
+        folded weight and bias and executes only Conv semantics.
+        """
+        values: Dict[str, cp.ndarray] = dict(self.weights)
+        values.update(self.constants)
+
+        for node_id in list(self.graph.node_order):
+            node = self.graph.nodes.get(node_id)
+            if node is None or node.op_type != "FusedConv2dBatchNorm":
+                continue
+            if node.attributes.get("bn_folded"):
+                continue
+
+            offset = int(node.attributes.get("bn_parameter_offset", len(node.inputs)))
+            conv_inputs = list(node.inputs[:offset])
+            bn_inputs = list(node.inputs[offset:offset + 4])
+            if len(conv_inputs) < 2 or len(bn_inputs) != 4:
+                raise ValueError(
+                    f"Fused Conv+BN node '{node_id}' has an invalid parameter ABI"
+                )
+            required = [conv_inputs[1], *bn_inputs]
+            missing = [name for name in required if name not in values]
+            if missing:
+                raise ValueError(
+                    f"Fused Conv+BN node '{node_id}' cannot resolve initializers: "
+                    f"{missing}"
+                )
+
+            weight = cp.asarray(values[conv_inputs[1]], dtype=cp.float32)
+            scale, bn_bias, mean, variance = (
+                cp.asarray(values[name], dtype=cp.float32).reshape(-1)
+                for name in bn_inputs
+            )
+            channels = int(weight.shape[0])
+            if any(int(value.size) != channels
+                   for value in (scale, bn_bias, mean, variance)):
+                raise ValueError(
+                    f"Fused Conv+BN node '{node_id}' parameter/channel mismatch"
+                )
+
+            if len(conv_inputs) >= 3 and conv_inputs[2]:
+                if conv_inputs[2] not in values:
+                    raise ValueError(
+                        f"Fused Conv+BN node '{node_id}' cannot resolve Conv bias "
+                        f"'{conv_inputs[2]}'"
+                    )
+                conv_bias = cp.asarray(
+                    values[conv_inputs[2]], dtype=cp.float32
+                ).reshape(-1)
+            else:
+                conv_bias = cp.zeros_like(mean, dtype=cp.float32)
+
+            epsilon = float(node.attributes.get("bn_epsilon", 1e-5))
+            factor = scale / cp.sqrt(variance + cp.float32(epsilon))
+            folded_weight = weight * factor.reshape(
+                (channels,) + (1,) * (weight.ndim - 1)
+            )
+            folded_bias = (conv_bias - mean) * factor + bn_bias
+
+            folded_weight_name = f"__c3_folded_{node_id}_weight__"
+            folded_bias_name = f"__c3_folded_{node_id}_bias__"
+            self.weights[folded_weight_name] = cp.ascontiguousarray(
+                folded_weight, dtype=cp.float32
+            )
+            self.weights[folded_bias_name] = cp.ascontiguousarray(
+                folded_bias, dtype=cp.float32
+            )
+            for name, value in (
+                (folded_weight_name, self.weights[folded_weight_name]),
+                (folded_bias_name, self.weights[folded_bias_name]),
+            ):
+                tensor = self.graph.register_tensor(
+                    name,
+                    dtype=ONNSType.FLOAT,
+                    shape=list(value.shape),
+                    is_initializer=True,
+                )
+                self.graph.initializers[name] = tensor
+                self.graph.tensor_producer[name] = "INITIALIZER"
+
+            self.graph.replace_node_inputs(
+                node_id,
+                list(node.inputs),
+                [conv_inputs[0], folded_weight_name, folded_bias_name],
+            )
+            node.attributes["bn_folded"] = True
+            node.attributes["bn_parameter_offset"] = 3
+            node.attributes["folded_weight"] = folded_weight_name
+            node.attributes["folded_bias"] = folded_bias_name
+
+        self.graph.validate()
 
     def run(self, feed_dict: Dict[str, cp.ndarray]) -> Dict[str, cp.ndarray]:
         """Execute the full graph.
@@ -180,7 +297,7 @@ class GraphExecutor:
 
         # Inject node-level metadata into attributes for ops that need it
         attrs = dict(node.attributes)
-        if op_type == "Split":
+        if op_type in {"Split", "LayerNormalization"}:
             attrs["_num_outputs"] = len(node.outputs)
 
         # Execute
@@ -196,26 +313,364 @@ class GraphExecutor:
             # Multi-output ops like Split
             for i, out_name in enumerate(node.outputs):
                 if out_name and i < len(result):
-                    self.values[out_name] = engine.ascontiguousarray(
-                        result[i], dtype=engine.array_module().float32
-                    )
+                    self.values[out_name] = engine.ascontiguousarray(result[i])
         else:
             for out_name in node.outputs:
                 if out_name:
-                    self.values[out_name] = engine.ascontiguousarray(
-                        result, dtype=engine.array_module().float32
-                    )
+                    self.values[out_name] = engine.ascontiguousarray(result)
 
 
 class PlannedGraphExecutor(GraphExecutor):
-    """Reference executor whose node order is authorized by a C3.4 plan.
+    """CuPy executor driven by the complete C3.4 action timeline."""
 
-    The plan contains decomposed C3.2 kernel steps. This array executor still
-    evaluates each high-level node with CuPy, but it refuses to execute unless
-    every planned kernel binding/event is valid and every optimized graph node
-    is represented in the plan.  It therefore connects and tests the compiler
-    stages while executing numerical operators on the designated AEC H200.
-    """
+    def __init__(self, graph: Graph, model_path: str):
+        # Avoid GraphExecutor.__init__: eager device conversion there would
+        # upload all model data before the plan's H2D actions execute.
+        self.graph = graph
+        self.host_weights = _extract_initializer_data(model_path)
+        self.host_constants = _extract_constant_values(model_path)
+        self._preplanned_device_tensors: set[str] = set()
+        self._materialize_device_conv_batchnorm_folds()
+        self.weights: Dict[str, Any] = {}
+        self.constants: Dict[str, Any] = {}
+        self.values: Dict[str, Any] = {}
+        self.last_execution_trace: List[Dict[str, Any]] = []
+        self.last_host_outputs: Dict[str, Any] = {}
+        self.memory_trace: List[Dict[str, Any]] = []
+        self._temporaries: List[Any] = []
+        self._pinned_staging: List[Any] = []
+        self._arena_cache: Dict[int, cp.ndarray] = {}
+        self._resident_model_tensors: Dict[str, cp.ndarray] = {}
+        # CuPy's default pool keeps free blocks in per-stream arenas.  Creating
+        # fresh streams for every input batch prevents those blocks from being
+        # reused and makes pool reservation grow roughly once per batch.  Keep
+        # one physical stream for each logical plan stream for the lifetime of
+        # the executor instead.
+        self._streams: Dict[int, cp.cuda.Stream] = {}
+        self._events_by_plan: Dict[
+            int, Tuple[ExecutionPlan, Dict[str, cp.cuda.Event]]
+        ] = {}
+        self._stream_objects_created = 0
+        self._event_objects_created = 0
+        self._planned_runs = 0
+        self._memory_trace_dropped = 0
+
+    def _materialize_device_conv_batchnorm_folds(self) -> None:
+        """Fold Conv+BN with CuPy and feed the result through planned D2D copies."""
+        values: Dict[str, Any] = dict(self.host_weights)
+        values.update(self.host_constants)
+        for node_id in list(self.graph.node_order):
+            node = self.graph.nodes.get(node_id)
+            if node is None or node.op_type != "FusedConv2dBatchNorm":
+                continue
+            if node.attributes.get("bn_folded"):
+                continue
+            offset = int(node.attributes.get("bn_parameter_offset", len(node.inputs)))
+            conv_inputs = list(node.inputs[:offset])
+            bn_inputs = list(node.inputs[offset:offset + 4])
+            if len(conv_inputs) < 2 or len(bn_inputs) != 4:
+                raise ValueError(
+                    f"Fused Conv+BN node '{node_id}' has an invalid parameter ABI"
+                )
+            required = [conv_inputs[1], *bn_inputs]
+            missing = [name for name in required if name not in values]
+            if missing:
+                raise ValueError(
+                    f"Fused Conv+BN node '{node_id}' cannot resolve initializers: "
+                    f"{missing}"
+                )
+            weight = cp.asarray(values[conv_inputs[1]], dtype=cp.float32)
+            scale, bn_bias, mean, variance = (
+                cp.asarray(values[name], dtype=cp.float32).reshape(-1)
+                for name in bn_inputs
+            )
+            channels = int(weight.shape[0])
+            if any(int(value.size) != channels
+                   for value in (scale, bn_bias, mean, variance)):
+                raise ValueError(
+                    f"Fused Conv+BN node '{node_id}' parameter/channel mismatch"
+                )
+            if len(conv_inputs) >= 3 and conv_inputs[2]:
+                conv_bias = cp.asarray(
+                    values[conv_inputs[2]], dtype=cp.float32
+                ).reshape(-1)
+            else:
+                conv_bias = cp.zeros_like(mean, dtype=cp.float32)
+            epsilon = float(node.attributes.get("bn_epsilon", 1e-5))
+            factor = scale / cp.sqrt(variance + cp.float32(epsilon))
+            folded_weight = cp.ascontiguousarray(
+                weight * factor.reshape(
+                    (channels,) + (1,) * (weight.ndim - 1)
+                ),
+                dtype=cp.float32,
+            )
+            folded_bias = cp.ascontiguousarray(
+                (conv_bias - mean) * factor + bn_bias,
+                dtype=cp.float32,
+            )
+            folded_weight_name = f"__c3_folded_{node_id}_weight__"
+            folded_bias_name = f"__c3_folded_{node_id}_bias__"
+            self.host_weights[folded_weight_name] = folded_weight
+            self.host_weights[folded_bias_name] = folded_bias
+            self._preplanned_device_tensors.update({
+                folded_weight_name, folded_bias_name,
+            })
+            values[folded_weight_name] = folded_weight
+            values[folded_bias_name] = folded_bias
+            for name, value in (
+                (folded_weight_name, folded_weight),
+                (folded_bias_name, folded_bias),
+            ):
+                tensor = self.graph.register_tensor(
+                    name,
+                    dtype=ONNSType.FLOAT,
+                    shape=list(value.shape),
+                    is_initializer=True,
+                )
+                self.graph.initializers[name] = tensor
+                self.graph.tensor_producer[name] = "INITIALIZER"
+            self.graph.replace_node_inputs(
+                node_id,
+                list(node.inputs),
+                [conv_inputs[0], folded_weight_name, folded_bias_name],
+            )
+            node.attributes["bn_folded"] = True
+            node.attributes["bn_parameter_offset"] = 3
+            node.attributes["folded_weight"] = folded_weight_name
+            node.attributes["folded_bias"] = folded_bias_name
+        self.graph.validate()
+
+    @staticmethod
+    def _array_shape_dtype(value: Any) -> Tuple[Tuple[int, ...], Any]:
+        if isinstance(value, cp.ndarray):
+            return tuple(value.shape), value.dtype
+        shape = tuple(getattr(value, "shape", ()))
+        dtype = getattr(value, "dtype", None)
+        if dtype is None:
+            dtype = cp.asarray(value).dtype
+        return shape, cp.dtype(dtype)
+
+    @staticmethod
+    def _allocation_view(
+        arena: cp.ndarray,
+        allocation: Any,
+        shape: Tuple[int, ...],
+        dtype: Any,
+    ) -> cp.ndarray:
+        dtype = cp.dtype(dtype)
+        elements = 1
+        for dimension in shape:
+            elements *= int(dimension)
+        required = elements * dtype.itemsize
+        capacity = allocation.capacity_bytes or allocation.size_bytes
+        if required > capacity:
+            raise ValueError(
+                f"Tensor '{allocation.tensor_name}' requires {required} bytes, "
+                f"planned capacity is {capacity}"
+            )
+        byte_view = arena[
+            allocation.offset_bytes:allocation.offset_bytes + capacity
+        ]
+        typed = byte_view.view(dtype)
+        return typed[:elements].reshape(shape)
+
+    def _copy_h2d(
+        self,
+        source: Any,
+        destination: cp.ndarray,
+        stream: cp.cuda.Stream,
+    ) -> None:
+        """Issue a plan-controlled H2D or input-device copy."""
+        if isinstance(source, cp.ndarray):
+            with stream:
+                cp.copyto(destination, source.astype(destination.dtype, copy=False))
+            return
+        if all(hasattr(source, attr) for attr in ("tobytes", "nbytes")):
+            payload = source.tobytes(order="C")
+            if len(payload) != destination.nbytes:
+                raise ValueError(
+                    f"H2D byte size mismatch: host={len(payload)}, "
+                    f"device={destination.nbytes}"
+                )
+            pinned = cp.cuda.alloc_pinned_memory(len(payload))
+            memoryview(pinned).cast("B")[:len(payload)] = payload
+            self._pinned_staging.append(pinned)
+            cp.cuda.runtime.memcpyAsync(
+                destination.data.ptr,
+                pinned.ptr,
+                len(payload),
+                cp.cuda.runtime.memcpyHostToDevice,
+                stream.ptr,
+            )
+            return
+        with stream:
+            scalar = cp.asarray(source, dtype=destination.dtype).reshape(
+                destination.shape
+            )
+            cp.copyto(destination, scalar)
+            self._temporaries.append(scalar)
+
+    def _execute_planned_node(
+        self,
+        node: Node,
+        kernel_step: Any,
+        arena: cp.ndarray,
+        allocations: Dict[str, Any],
+    ) -> None:
+        if node.op_type == "Constant":
+            for output_name in node.outputs:
+                if output_name and output_name not in self.values:
+                    raise KeyError(
+                        f"Planned Constant '{node.id}' was not uploaded"
+                    )
+            return
+
+        inputs: List[Any] = []
+        for input_name in node.inputs:
+            if not input_name:
+                inputs.append(None)
+            elif input_name not in self.values:
+                raise KeyError(
+                    f"Planned node '{node.id}' requires unavailable tensor "
+                    f"'{input_name}'"
+                )
+            else:
+                inputs.append(self.values[input_name])
+        attrs = dict(node.attributes)
+        if node.op_type in {"Split", "LayerNormalization"}:
+            attrs["_num_outputs"] = len(node.outputs)
+        direct_output: Optional[cp.ndarray] = None
+        direct_fused_ops = {
+            "FusedAttentionScores",
+            "FusedConvActivation",
+            "FusedConvResidualActivation",
+            "FusedEWChain",
+            "FusedGemmEpilogue",
+            "FusedLayerNormalization",
+            "FusedMatMulBias",
+            "FusedResidualNorm",
+            "FusedSoftmaxDropout",
+            "FusedTransposeReshape",
+        }
+        if (
+            node.op_type in direct_fused_ops
+            and len([name for name in node.outputs if name]) == 1
+            and inputs
+            and isinstance(inputs[0], cp.ndarray)
+        ):
+            output_name = next(name for name in node.outputs if name)
+            alloc_id = kernel_step.outputs.get(output_name)
+            if alloc_id is None or alloc_id not in allocations:
+                raise KeyError(
+                    f"Planned output '{output_name}' has no allocation"
+                )
+            output_tensor = self.graph.tensors.get(output_name)
+            if output_tensor is None or not output_tensor.shape:
+                raise ValueError(
+                    f"Fused output '{output_name}' has no shape metadata"
+                )
+            output_shape: List[int] = []
+            for dimension_index, dimension in enumerate(output_tensor.shape):
+                try:
+                    concrete = int(dimension)
+                except (TypeError, ValueError):
+                    concrete = -1
+                if concrete <= 0:
+                    if dimension_index == 0 and inputs[0].ndim > 0:
+                        concrete = int(inputs[0].shape[0])
+                    else:
+                        raise ValueError(
+                            f"Fused output '{output_name}' has unresolved "
+                            f"dimension {dimension!r} at axis {dimension_index}"
+                        )
+                output_shape.append(concrete)
+            direct_output = self._allocation_view(
+                arena,
+                allocations[alloc_id],
+                tuple(output_shape),
+                cp.float32,
+            )
+            attrs["_planned_output"] = direct_output
+        result = engine.execute_op(node.op_type, inputs, attrs)
+        result_values = result if isinstance(result, list) else [result]
+        for output_name, output_value in zip(node.outputs, result_values):
+            if not output_name:
+                continue
+            # The destination arena view is contiguous.  cp.copyto accepts a
+            # strided source, so forcing every high-level result through
+            # ascontiguousarray only creates another full-sized temporary.
+            output_value = cp.asarray(output_value)
+            alloc_id = kernel_step.outputs.get(output_name)
+            if alloc_id is None or alloc_id not in allocations:
+                raise KeyError(
+                    f"Planned output '{output_name}' has no allocation"
+                )
+            destination = self._allocation_view(
+                arena,
+                allocations[alloc_id],
+                tuple(output_value.shape),
+                output_value.dtype,
+            )
+            writes_destination = (
+                direct_output is not None
+                and output_value.data.ptr == destination.data.ptr
+                and output_value.shape == destination.shape
+                and output_value.strides == destination.strides
+            )
+            if not writes_destination:
+                cp.copyto(destination, output_value)
+                self._temporaries.append(output_value)
+            self.values[output_name] = destination
+
+    def _runtime_resources(
+        self,
+        plan: ExecutionPlan,
+    ) -> Tuple[Dict[int, cp.cuda.Stream], Dict[str, cp.cuda.Event]]:
+        """Return persistent CUDA streams and plan-specific reusable events.
+
+        Every planned invocation synchronizes all participating streams before
+        returning, so reusing these events on the next batch is deterministic
+        and race-free.  Logical stream IDs are shared across batch-size plans;
+        a final partial batch therefore does not create another set of physical
+        CUDA streams.
+        """
+        stream_ids = sorted({
+            action.stream_id for action in plan.timeline
+            if action.kind not in {"ALLOC", "FREE"}
+        })
+        for stream_id in stream_ids:
+            if stream_id not in self._streams:
+                self._streams[stream_id] = cp.cuda.Stream(non_blocking=True)
+                self._stream_objects_created += 1
+
+        plan_key = id(plan)
+        cached = self._events_by_plan.get(plan_key)
+        if cached is None or cached[0] is not plan:
+            plan_events = {
+                event.event_id: cp.cuda.Event(disable_timing=True)
+                for event in plan.events
+            }
+            self._events_by_plan[plan_key] = (plan, plan_events)
+            self._event_objects_created += len(plan_events)
+        else:
+            plan_events = cached[1]
+
+        return (
+            {stream_id: self._streams[stream_id] for stream_id in stream_ids},
+            plan_events,
+        )
+
+    def runtime_resource_stats(self) -> Dict[str, int]:
+        """Expose persistent runtime state for validation and release evidence."""
+        return {
+            "planned_runs": self._planned_runs,
+            "stream_objects_created": self._stream_objects_created,
+            "stream_objects_active": len(self._streams),
+            "event_objects_created": self._event_objects_created,
+            "event_plan_count": len(self._events_by_plan),
+            "memory_trace_records": len(self.memory_trace),
+            "memory_trace_dropped": self._memory_trace_dropped,
+        }
 
     def run_planned(
         self,
@@ -237,12 +692,7 @@ class PlannedGraphExecutor(GraphExecutor):
                 f"size {next(iter(sample_counts))}"
             )
 
-        planned_node_order: List[str] = []
-        seen = set()
-        for step in plan.kernel_steps:
-            if step.node_id not in seen:
-                seen.add(step.node_id)
-                planned_node_order.append(step.node_id)
+        seen = {step.node_id for step in plan.kernel_steps}
 
         graph_nodes = set(self.graph.nodes)
         if seen != graph_nodes:
@@ -253,12 +703,149 @@ class PlannedGraphExecutor(GraphExecutor):
                 f"missing_nodes={missing[:10]}, unexpected_nodes={unexpected[:10]}"
             )
 
+        if not plan.timeline:
+            raise ValueError("C3.4 execution plan has no executable timeline")
+
+        allocations = {
+            allocation.alloc_id: allocation for allocation in plan.allocations
+        }
+        plan_key = id(plan)
+        arena_bytes = max(1, plan.pool_stats.peak_reserved_bytes)
+        arena = self._arena_cache.get(plan_key)
+        if arena is None or int(arena.nbytes) < arena_bytes:
+            arena = cp.empty(arena_bytes, dtype=cp.uint8)
+            self._arena_cache[plan_key] = arena
+        newly_resident_model_tensors: Dict[str, cp.ndarray] = {}
+        streams, events = self._runtime_resources(plan)
+        pool = cp.get_default_memory_pool()
+        pool_before = {
+            "used_bytes": int(pool.used_bytes()),
+            "reserved_bytes": int(pool.total_bytes()),
+        }
+
         self.values.clear()
-        self.values.update(self.weights)
-        self.values.update(self.constants)
-        self.values.update(feed_dict)
-        for node_id in planned_node_order:
-            self._execute_node(self.graph.nodes[node_id])
+        self.last_execution_trace.clear()
+        self.last_host_outputs.clear()
+        self._temporaries.clear()
+        self._pinned_staging.clear()
+
+        for action in plan.timeline:
+            trace_entry = {
+                "step_index": action.step_index,
+                "kind": action.kind,
+                "stream_id": action.stream_id,
+                "tensor_name": action.tensor_name,
+                "event_id": action.event_id,
+                "status": "executed",
+            }
+            self.last_execution_trace.append(trace_entry)
+            if action.kind == "ALLOC":
+                continue
+            if action.kind == "FREE":
+                if action.tensor_name is not None:
+                    self.values.pop(action.tensor_name, None)
+                continue
+
+            stream = streams[action.stream_id]
+            if action.kind == "EVENT_WAIT":
+                stream.wait_event(events[action.event_id])
+            elif action.kind == "EVENT_RECORD":
+                events[action.event_id].record(stream)
+            elif action.kind == "H2D":
+                transfer = plan.transfers[action.ref_index]
+                allocation = allocations[transfer.alloc_id]
+                is_model_tensor = transfer.tensor_name in plan.weight_slots
+                resident = self._resident_model_tensors.get(transfer.tensor_name)
+                if resident is None:
+                    resident = newly_resident_model_tensors.get(
+                        transfer.tensor_name
+                    )
+                if is_model_tensor and resident is not None:
+                    destination = self._allocation_view(
+                        arena, allocation, tuple(resident.shape), resident.dtype
+                    )
+                    trace_entry["status"] = "resident"
+                    if resident.data.ptr != destination.data.ptr:
+                        with stream:
+                            cp.copyto(destination, resident)
+                else:
+                    if transfer.tensor_name in feed_dict:
+                        source = feed_dict[transfer.tensor_name]
+                    elif transfer.tensor_name in self.host_weights:
+                        source = self.host_weights[transfer.tensor_name]
+                    elif transfer.tensor_name in self.host_constants:
+                        source = self.host_constants[transfer.tensor_name]
+                    else:
+                        raise KeyError(
+                            f"No H2D source for '{transfer.tensor_name}'"
+                        )
+                    shape, dtype = self._array_shape_dtype(source)
+                    destination = self._allocation_view(
+                        arena, allocation, shape, dtype
+                    )
+                    self._copy_h2d(source, destination, stream)
+                    if is_model_tensor:
+                        newly_resident_model_tensors[transfer.tensor_name] = (
+                            destination
+                        )
+                self.values[transfer.tensor_name] = destination
+            elif action.kind == "KERNEL":
+                kernel_step = plan.kernel_steps[action.ref_index]
+                node = self.graph.nodes[kernel_step.node_id]
+                with stream:
+                    self._execute_planned_node(
+                        node, kernel_step, arena, allocations
+                    )
+            elif action.kind == "D2H":
+                transfer = plan.transfers[action.ref_index]
+                if transfer.tensor_name not in self.values:
+                    raise KeyError(
+                        f"D2H source '{transfer.tensor_name}' is unavailable"
+                    )
+                source = self.values[transfer.tensor_name]
+                pinned = cp.cuda.alloc_pinned_memory(source.nbytes)
+                self._pinned_staging.append(pinned)
+                cp.cuda.runtime.memcpyAsync(
+                    pinned.ptr,
+                    source.data.ptr,
+                    source.nbytes,
+                    cp.cuda.runtime.memcpyDeviceToHost,
+                    stream.ptr,
+                )
+                self.last_host_outputs[transfer.tensor_name] = pinned
+            else:
+                raise ValueError(f"Unsupported timeline action: {action.kind}")
+
+        for stream in streams.values():
+            stream.synchronize()
+        self._resident_model_tensors.update(newly_resident_model_tensors)
+        for tensor_name in (
+            self._preplanned_device_tensors & newly_resident_model_tensors.keys()
+        ):
+            self.host_weights.pop(tensor_name, None)
+        self._preplanned_device_tensors.difference_update(
+            newly_resident_model_tensors
+        )
+        self._temporaries.clear()
+        self._pinned_staging.clear()
+        self._planned_runs += 1
+        memory_record = {
+            "run_index": self._planned_runs,
+            "batch_size": plan.batch_size,
+            "plan_arena_bytes": arena_bytes,
+            "logical_stream_count": len(streams),
+            "pool_used_bytes_before": pool_before["used_bytes"],
+            "pool_reserved_bytes_before": pool_before["reserved_bytes"],
+            "pool_used_bytes_after": int(pool.used_bytes()),
+            "pool_reserved_bytes_after": int(pool.total_bytes()),
+        }
+        # Keep instrumentation bounded for required batch-size-one validation
+        # while preserving the initial baseline and most recent observation.
+        if len(self.memory_trace) < 64:
+            self.memory_trace.append(memory_record)
+        else:
+            self.memory_trace[-1] = memory_record
+            self._memory_trace_dropped += 1
 
         outputs: Dict[str, cp.ndarray] = {}
         for out_tensor in self.graph.outputs:
@@ -495,7 +1082,7 @@ def load_and_infer(
         graph, model_path, qualify_optimizations=qualify_optimizations
     )
     output_name = graph.outputs[0].name if graph.outputs else "logits"
-    all_outputs: List[cp.ndarray] = []
+    final_device_output: Optional[cp.ndarray] = None
 
     t_infer_start = time.perf_counter()
 
@@ -509,13 +1096,28 @@ def load_and_infer(
 
         # Execute
         batch_outputs = executor.run(batch_feed)
-        all_outputs.append(batch_outputs[output_name])
+        batch_output = batch_outputs[output_name]
+        if batch_output.dtype != cp.float32:
+            raise ValueError(
+                f"Output '{output_name}' must be float32, got {batch_output.dtype}"
+            )
+        if final_device_output is None:
+            final_shape = (total_samples,) + tuple(batch_output.shape[1:])
+            final_device_output = cp.empty(final_shape, dtype=cp.float32)
+        if tuple(batch_output.shape[1:]) != tuple(final_device_output.shape[1:]):
+            raise ValueError(
+                f"Output '{output_name}' changed non-batch shape from "
+                f"{final_device_output.shape[1:]} to {batch_output.shape[1:]}"
+            )
+        # The planned output is a reusable arena view.  Copy directly into its
+        # final position instead of retaining one allocation per batch and
+        # allocating another full output for concatenate().
+        cp.copyto(final_device_output[start:end], batch_output)
+        cp.cuda.get_current_stream().synchronize()
 
-    # 6. Concatenate outputs
-    final_device_output = engine.array_module().concatenate(all_outputs, axis=0)
-    final_device_output = engine.ascontiguousarray(
-        final_device_output, dtype=engine.array_module().float32
-    )
+    # 6. Final output was assembled in sample order during batched execution.
+    if final_device_output is None:
+        raise RuntimeError("Inference produced no output batches")
     engine.synchronize()
     t_infer_end = time.perf_counter()
     # 7. Validate output
@@ -553,13 +1155,48 @@ def load_and_infer(
     t_end = time.perf_counter()
 
     fusion_stats = executor.fusion_result["Fusion"]["stats"]
+    trace = executor.optimized_executor.last_execution_trace
+    trace_counts = {
+        kind: sum(action["kind"] == kind for action in trace)
+        for kind in (
+            "ALLOC", "H2D", "EVENT_WAIT", "KERNEL",
+            "EVENT_RECORD", "FREE", "D2H",
+        )
+    }
+    resident_h2d = sum(
+        action["kind"] == "H2D" and action["status"] == "resident"
+        for action in trace
+    )
+    backend_evidence = engine.runtime_evidence()
+    runtime_resources = executor.optimized_executor.runtime_resource_stats()
+    memory_trace = executor.optimized_executor.memory_trace
+    if memory_trace:
+        backend_evidence.update({
+            "batch_count": runtime_resources["planned_runs"],
+            "runtime_stream_objects": runtime_resources[
+                "stream_objects_active"
+            ],
+            "runtime_event_objects": runtime_resources[
+                "event_objects_created"
+            ],
+            "max_plan_arena_bytes": max(
+                record["plan_arena_bytes"] for record in memory_trace
+            ),
+            "pool_reserved_bytes_before_first_batch": memory_trace[0][
+                "pool_reserved_bytes_before"
+            ],
+            "pool_reserved_bytes_after_last_batch": memory_trace[-1][
+                "pool_reserved_bytes_after"
+            ],
+        })
+
     return {
         "model_path": model_path,
         "input_dir": input_dir,
         "output_dir": output_dir,
         "batch_size": actual_batch,
         "backend": "cupy",
-        "backend_evidence": engine.runtime_evidence(),
+        "backend_evidence": backend_evidence,
         "total_samples": total_samples,
         "output_shape": list(final_device_output.shape),
         "parse_time_s": t_parse_end - t_parse_start,
@@ -570,4 +1207,11 @@ def load_and_infer(
         "fusion_stats": fusion_stats,
         "qualification_max_abs_diff": executor.qualification_max_abs_diff,
         "plan_summary": executor.last_plan.summary() if executor.last_plan else None,
+        "plan_runtime": {
+            "timeline_actions_consumed": len(trace),
+            "action_counts": trace_counts,
+            "resident_h2d_actions": resident_h2d,
+            "resources": runtime_resources,
+            "memory_trace": memory_trace,
+        },
     }

@@ -67,13 +67,16 @@ class ScoringRegressionTests(unittest.TestCase):
         fused = next(n for n in graph.nodes.values() if n.op_type == "FusedConv2dBatchNorm")
         self.assertEqual(fused.inputs[-4:], ["bn_scale", "bn_bias", "bn_mean", "bn_var"])
 
-        rng = cp.random.default_rng(7)
-        x = rng.normal(size=(1, 3, 5, 5)).astype(cp.float32)
-        weight = rng.normal(size=(16, 3, 3, 3)).astype(cp.float32)
-        scale = rng.normal(size=16).astype(cp.float32)
-        bias = rng.normal(size=16).astype(cp.float32)
-        mean = rng.normal(size=16).astype(cp.float32)
-        var = cp.abs(rng.normal(size=16)).astype(cp.float32) + 0.1
+        # Deterministic ramps avoid depending on random.Generator methods that
+        # are not uniformly available in the organizer's CuPy 14.1.1 build.
+        x = cp.linspace(-1.0, 1.0, 75, dtype=cp.float32).reshape(1, 3, 5, 5)
+        weight = cp.linspace(
+            -0.5, 0.5, 16 * 3 * 3 * 3, dtype=cp.float32
+        ).reshape(16, 3, 3, 3)
+        scale = cp.linspace(0.5, 1.5, 16, dtype=cp.float32)
+        bias = cp.linspace(-0.2, 0.2, 16, dtype=cp.float32)
+        mean = cp.linspace(-0.1, 0.1, 16, dtype=cp.float32)
+        var = cp.linspace(0.1, 1.6, 16, dtype=cp.float32)
         actual = execute_op(
             fused.op_type, [x, weight, scale, bias, mean, var], fused.attributes
         )

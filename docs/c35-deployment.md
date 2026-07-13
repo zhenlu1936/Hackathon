@@ -12,11 +12,25 @@ the framework. The timed command performs no network access and generates
 outputs from supplied inputs.
 
 The released implementation uses CuPy/CUDA as its only connected H200
-backend. It applies C3.3 to the shared graph, builds the C3.4 plan through C3.2
-decomposition, validates bindings/events and plan/graph identity, and executes
-nodes in planned order. Weights and batches move to CuPy once and final outputs
-return to the host once. Numerical qualification remains an internal test path
-and is not exposed through the evaluator-facing CLI.
+backend. It applies C3.3 to the shared graph, retains C3.2 decomposition as
+review metadata, builds a unified C3.4 high-level-node timeline, validates
+bindings/events and plan/graph identity, and consumes the timeline through a
+CuPy arena with allocation views, copy/compute streams, and events. Direct
+C3.2 kernel-step execution is still an open architecture item, and the new
+timeline runtime still requires H200 qualification. Numerical qualification
+remains an internal test path and is not exposed through the evaluator-facing
+CLI.
+Logical copy/compute streams persist across all batches, plan events are reused
+after synchronization, and real fused Softmax+Dropout and Residual+LayerNorm
+kernels can write directly into planned output views. Final logits are copied
+into their preallocated full-dataset positions rather than retained as one
+allocation per batch and concatenated afterward.
+Generated Gemm/MatMul epilogues, Conv activation/residual epilogues, attention
+scores, single-output LayerNormalization, elementwise chains, and
+Transpose+Reshape also write directly into planned arena views. Their source is
+compiled during execution; no precompiled kernel or generated model answer is
+shipped. This exact revision still requires the remote H200 numerical and cold
+performance rerun before becoming default release evidence.
 The CLI exposes no backend selector; CuPy is the mandatory implementation.
 
 ## CLI and data contract
@@ -61,8 +75,8 @@ Treat `--batch-size` as a maximum processing chunk:
 1. Validate it is positive.
 2. Slice all inputs on dimension 0 with identical boundaries.
 3. Concretize dynamic `N` for that chunk.
-4. Execute and collect outputs.
-5. Concatenate in original order.
+4. Execute and copy the arena-backed result into its final sample range.
+5. Reuse the same physical streams/events and planned arena on the next chunk.
 6. Verify the final leading dimension equals input `N`.
 
 Do not require 10,000 samples or a particular batch size. Test `N` smaller than, equal to, and not divisible by the requested batch size.

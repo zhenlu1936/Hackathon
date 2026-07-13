@@ -58,6 +58,12 @@ Every multi-kernel lowering must name its internal results in `KernelSpecRef.out
 
 Track full tensor metadata: shape, dtype, byte size, producer kernel, consuming kernels, and last use. These tensors become the input to C3.4 memory planning.
 
+`Strategy.decompose` now validates each sequence before returning it: every
+input must be a node input or a previously produced intermediate, no tensor may
+be produced twice, and every non-empty node output must be produced. The
+selected `PrecisionProfile` is attached to each `KernelSpecRef` so downstream
+planning does not infer precision from kernel-name spelling.
+
 ## D4: tuning validity (3 points)
 
 Target tuning coverage above 90%. Fill all required fields for every tunable kernel:
@@ -79,13 +85,30 @@ The hardware object must be the source of truth for precision, thread, shared-me
 
 Do not hardcode a high-end GPU profile to claim capabilities. Load the fixed evaluator/AEC target profile through documented configuration or device query, validate it, and fail clearly when a requested precision or kernel is unavailable.
 
+`HardwareCapability.query_cupy_device()` and
+`c32.api.activate_cupy_hardware()` provide the device-query path. CUDA resource
+limits and compute capability are read from CuPy, the resulting profile is
+marked with its source, and Hopper discovery conservatively leaves FP4 disabled
+unless a separately executable and qualified AEC FP4/W4A16 path is explicitly
+declared. The static four-precision object remains a microbenchmark coverage
+profile and is intentionally marked `verified=False`; it is not H200 evidence.
+
 ## Implementation coverage
 
-The release includes non-empty lowering for all 17 public operators, complete
-MatMul/Gemm and Conv paths, named Softmax and LayerNormalization intermediates,
-generic valid tuning defaults, and hardware-aware mixed-precision selection.
-FP8/FP4 coverage remains structural until executable AEC kernels are connected
-and numerically qualified.
+The release includes non-empty lowering for all 17 public operators, aliases
+for `Linear`, `Conv2d`, and `LayerNorm`, connected multi-output LayerNorm,
+complete MatMul/Gemm and Conv paths, named Softmax and normalization
+intermediates, generic valid tuning defaults, and hardware-aware mixed-precision
+selection. Conv selects Winograd only for group-one, unit-stride, unit-dilation
+3x3 cases and otherwise uses im2col. FP8/FP4 coverage remains structural until
+executable AEC kernels are connected and numerically qualified.
+
+C3.3 optimized nodes now also have explicit one-reference decompositions for
+Gemm epilogues, Conv activation/residual epilogues, attention scores,
+single-output LayerNormalization, and Transpose+Reshape. These additions do not
+alter the public unfused C3.2 sequences used for D2/D3 scoring; they let C3.3
+launch and buffer accounting consume a connected lowering instead of an opaque
+fallback label.
 
 ## Validation evidence
 
@@ -97,7 +120,7 @@ and numerically qualified.
 - Repeated-call determinism checks for precision, decomposition, and tuning.
 - Native-server dependency and originality disclosures for any kernel library or generated implementation.
 
-Current structural evidence: all 13 released sensitive nodes select FP32; all 49 tunable nodes select a declared-supported precision; fp32/fp16/fp8/fp4 all appear; and five independent policy regressions pass. The FULL_FP32 numerical verification (`c32.test_c32.test_full_fp32_numerical`) is a hard D1 gate, not an extra score item. On the AEC H200 it compares the connected C3.1→C3.5 CuPy output with golden results using `max_abs_diff <= 1e-3` and `top1_match >= 0.99`. This test has not yet been rerun after the bounded-region revision, so it is a validation path rather than current numerical proof. It does not qualify FP8/FP4 AEC kernels.
+Current structural evidence: all 13 released sensitive nodes select FP32; all 49 tunable nodes select a declared-supported precision; fp32/fp16/fp8/fp4 all appear; and five independent policy regressions pass. Seven dependency-light contract regressions additionally pass without ONNX/CUDA. They cover device-property parsing, all declared launch limits, alias lowering, connected three-output LayerNorm, guarded Conv selection, rebuilding missing topological order, and rejection of invalid precision/plans. The FULL_FP32 numerical verification (`c32.test_c32.test_full_fp32_numerical`) is a hard D1 gate, not an extra score item. On the AEC H200 the latest supplied run compared the connected C3.1→C3.5 CuPy output with golden results using `max_abs_diff <= 1e-3` and `top1_match >= 0.99`; all three two-sample batches passed. This is high-level graph-path evidence and does not qualify direct C3.2 kernel-step execution or FP8/FP4 AEC kernels.
 
 ## Open dependency
 

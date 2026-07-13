@@ -5,15 +5,10 @@ Each function returns a non-empty list of KernelSpecRef.
 
 from __future__ import annotations
 
-import math
-from typing import Any, Dict, List, Optional
+from typing import List
 
 from c3common.ir.graph import Graph, Node
-from c32.kernel_spec import KernelSpecRef, KernelTuningParams, PrecisionProfile
-
-
-def _ceil_div(a: int, b: int) -> int:
-    return (a + b - 1) // b
+from c32.kernel_spec import KernelSpecRef, PrecisionProfile
 
 
 def _inter_name(node_id: str, idx: int) -> str:
@@ -30,22 +25,6 @@ def _kernel_name(base: str, precision: PrecisionProfile) -> str:
     # Normalize precision suffix: fp32→f32, fp16→f16, fp8→f8, fp4→f4
     suffix = dt.replace("fp", "f") if dt.startswith("fp") else dt
     return f"{base}_{suffix}"
-
-
-def _default_tuning(
-    problem_size: int,
-    block_x: int = 256,
-    smem_bytes: int = 0,
-    max_threads: int = 1024,
-    max_smem: int = 49152,
-) -> KernelTuningParams:
-    actual_block = min(block_x, max_threads)
-    grid_x = max(1, _ceil_div(problem_size, actual_block))
-    return KernelTuningParams(
-        block_x=actual_block,
-        grid_x=grid_x,
-        smem_bytes=smem_bytes if smem_bytes <= max_smem else -1,
-    )
 
 
 # ── Elementwise ops ────────────────────────────
@@ -92,7 +71,10 @@ def decompose_Reshape(node: Node, graph: Graph, precision: PrecisionProfile) -> 
 
 
 def decompose_Transpose(node: Node, graph: Graph, precision: PrecisionProfile) -> List[KernelSpecRef]:
-    perm = list(node.attributes.get("perm", []))
+    # ``perm`` omitted means reverse the dimensions.  Preserve omission as
+    # None instead of an empty permutation, which has different semantics.
+    perm_attr = node.attributes.get("perm")
+    perm = None if perm_attr is None else list(perm_attr)
     return [KernelSpecRef(kernel_name="transpose", inputs=list(node.inputs), outputs=list(node.outputs),
                           operator_params={"perm": perm})]
 
@@ -101,7 +83,8 @@ def decompose_Split(node: Node, graph: Graph, precision: PrecisionProfile) -> Li
     axis = int(node.attributes.get("axis", 0))
     split_sizes = list(node.attributes.get("split", [])) if "split" in node.attributes else []
     return [KernelSpecRef(kernel_name="split", inputs=list(node.inputs), outputs=list(node.outputs),
-                          operator_params={"axis": axis, "split": split_sizes})]
+                          operator_params={"axis": axis, "split": split_sizes,
+                                           "_num_outputs": len(node.outputs)})]
 
 
 def decompose_Gather(node: Node, graph: Graph, precision: PrecisionProfile) -> List[KernelSpecRef]:
@@ -118,32 +101,17 @@ def decompose_Constant(node: Node, graph: Graph, precision: PrecisionProfile) ->
 # ── MatMul / Gemm ─────────────────────────────
 
 
-def _problem_size_matmul(node: Node, graph: Graph) -> Dict[str, int]:
-    inp_tensors = [graph.get_tensor(n) for n in node.inputs if n]
-    mat_shapes = []
-    for t in inp_tensors:
-        if t and len(t.shape) >= 2:
-            dims = []
-            for d in t.shape:
-                try:
-                    dims.append(int(d))
-                except (ValueError, TypeError):
-                    pass
-            if len(dims) >= 2:
-                mat_shapes.append(dims)
-    if len(mat_shapes) >= 2:
-        a_shape, b_shape = mat_shapes[0], mat_shapes[1]
-        trans_b = node.attributes.get("transB", 0)
-        m = a_shape[-2] if len(a_shape) >= 2 else 1
-        k = a_shape[-1]
-        n = b_shape[-2] if trans_b else b_shape[-1]
-        return {"m": m, "n": n, "k": k}
-    return {"m": 1, "n": 1, "k": 1}
-
-
 def decompose_MatMul(node: Node, graph: Graph, precision: PrecisionProfile) -> List[KernelSpecRef]:
     return [KernelSpecRef(kernel_name=_kernel_name("matmul", precision),
-                          inputs=list(node.inputs), outputs=list(node.outputs))]
+                          inputs=list(node.inputs), outputs=list(node.outputs),
+                          operator_params={"lowering_kind": "matmul"})]
+
+
+def decompose_Linear(node: Node, graph: Graph, precision: PrecisionProfile) -> List[KernelSpecRef]:
+    """Lower framework-style Linear using MatMul or Gemm semantics."""
+    if len(node.inputs) >= 3 and node.inputs[2]:
+        return decompose_Gemm(node, graph, precision)
+    return decompose_MatMul(node, graph, precision)
 
 
 def decompose_Gemm(node: Node, graph: Graph, precision: PrecisionProfile) -> List[KernelSpecRef]:
@@ -161,6 +129,7 @@ def decompose_Gemm(node: Node, graph: Graph, precision: PrecisionProfile) -> Lis
         "beta": float(node.attributes.get("beta", 1.0)),
         "transA": int(node.attributes.get("transA", 0)),
         "transB": int(node.attributes.get("transB", 0)),
+        "lowering_kind": "gemm",
     }
 
     if has_bias:
@@ -173,7 +142,8 @@ def decompose_Gemm(node: Node, graph: Graph, precision: PrecisionProfile) -> Lis
             KernelSpecRef(kernel_name=_kernel_name("add_bias", precision),
                           inputs=[matmul_out, node.inputs[2]],
                           outputs=list(node.outputs),
-                          operator_params={"beta": op_params["beta"]}),
+                          operator_params={"beta": op_params["beta"],
+                                           "bias_axis": -1}),
         ]
     else:
         return [
@@ -195,7 +165,6 @@ def decompose_Softmax(node: Node, graph: Graph, precision: PrecisionProfile) -> 
     """
     nid, inp, out = node.id, node.inputs[0], node.outputs[0]
     axis = int(node.attributes.get("axis", -1))
-    op_params = {"axis": axis}
     return [
         KernelSpecRef(kernel_name="reduce_max", inputs=[inp], outputs=[_inter_name(nid, 0)],
                       operator_params={"axis": axis, "keepdims": True}),
@@ -220,27 +189,45 @@ def decompose_LayerNormalization(node: Node, graph: Graph, precision: PrecisionP
     bias = node.inputs[2] if len(node.inputs) > 2 else None
     axis = int(node.attributes.get("axis", -1))
     epsilon = float(node.attributes.get("epsilon", 1e-5))
-    op_params = {"axis": axis, "epsilon": epsilon}
+    mean_out = node.outputs[1] if len(node.outputs) > 1 else _inter_name(nid, 0)
+    centered = _inter_name(nid, 1)
+    variance = _inter_name(nid, 3)
+    denominator = _inter_name(nid, 5)
+    normalized = _inter_name(nid, 6)
 
     refs = [
-        KernelSpecRef(kernel_name="reduce_mean", inputs=[inp], outputs=[_inter_name(nid, 0)],
-                      operator_params={"axis": axis, "keepdims": True}),
-        KernelSpecRef(kernel_name="sub", inputs=[inp, _inter_name(nid, 0)], outputs=[_inter_name(nid, 1)]),
-        KernelSpecRef(kernel_name="mul", inputs=[_inter_name(nid, 1), _inter_name(nid, 1)], outputs=[_inter_name(nid, 2)]),
-        KernelSpecRef(kernel_name="reduce_mean", inputs=[_inter_name(nid, 2)], outputs=[_inter_name(nid, 3)],
-                      operator_params={"axis": axis, "keepdims": True}),
-        KernelSpecRef(kernel_name="add", inputs=[_inter_name(nid, 3)], outputs=[_inter_name(nid, 4)],
+        KernelSpecRef(kernel_name="reduce_mean", inputs=[inp], outputs=[mean_out],
+                      operator_params={"axis": axis, "axes_from": axis,
+                                       "keepdims": True}),
+        KernelSpecRef(kernel_name="sub", inputs=[inp, mean_out], outputs=[centered]),
+        KernelSpecRef(kernel_name="mul", inputs=[centered, centered], outputs=[_inter_name(nid, 2)]),
+        KernelSpecRef(kernel_name="reduce_mean", inputs=[_inter_name(nid, 2)], outputs=[variance],
+                      operator_params={"axis": axis, "axes_from": axis,
+                                       "keepdims": True}),
+        KernelSpecRef(kernel_name="add", inputs=[variance], outputs=[_inter_name(nid, 4)],
                       operator_params={"epsilon": epsilon}),
-        KernelSpecRef(kernel_name="sqrt", inputs=[_inter_name(nid, 4)], outputs=[_inter_name(nid, 5)]),
-        KernelSpecRef(kernel_name="div", inputs=[_inter_name(nid, 1), _inter_name(nid, 5)], outputs=[_inter_name(nid, 6)]),
+        KernelSpecRef(kernel_name="sqrt", inputs=[_inter_name(nid, 4)], outputs=[denominator]),
     ]
+
+    if len(node.outputs) > 2:
+        inverse_std = node.outputs[2]
+        refs.extend([
+            KernelSpecRef(kernel_name="reciprocal", inputs=[denominator],
+                          outputs=[inverse_std]),
+            KernelSpecRef(kernel_name="mul", inputs=[centered, inverse_std],
+                          outputs=[normalized]),
+        ])
+    else:
+        refs.append(KernelSpecRef(kernel_name="div", inputs=[centered, denominator],
+                                  outputs=[normalized]))
+
     if weight:
         refs.append(KernelSpecRef(kernel_name="mul",
-                                  inputs=[_inter_name(nid, 6), weight],
+                                  inputs=[normalized, weight],
                                   outputs=[_inter_name(nid, 7)] if bias else [out]))
     if bias:
         refs.append(KernelSpecRef(kernel_name="add",
-                                  inputs=[_inter_name(nid, 7) if weight else _inter_name(nid, 6), bias],
+                                  inputs=[_inter_name(nid, 7) if weight else normalized, bias],
                                   outputs=[out]))
     if not weight and not bias:
         refs[-1].outputs = [out]
@@ -250,14 +237,35 @@ def decompose_LayerNormalization(node: Node, graph: Graph, precision: PrecisionP
 # ── Conv ──────────────────────────────────────
 
 
-def _conv_has_3x3(node: Node) -> bool:
-    ks = node.attributes.get("kernel_shape", [])
+def _conv_kernel_shape(node: Node, graph: Graph) -> List[int]:
+    ks = list(node.attributes.get("kernel_shape", []))
+    if ks:
+        return [int(value) for value in ks]
+    if len(node.inputs) > 1:
+        weight = graph.get_tensor(node.inputs[1])
+        if weight is not None and len(weight.shape) >= 3:
+            try:
+                return [int(value) for value in weight.shape[2:]]
+            except (TypeError, ValueError):
+                pass
+    return []
+
+
+def _conv_has_3x3(node: Node, graph: Graph) -> bool:
+    ks = _conv_kernel_shape(node, graph)
     return list(ks) == [3, 3] or list(ks) == [3]
 
 
-def _conv_stride(node: Node) -> int:
-    s = node.attributes.get("strides", [1, 1])
-    return int(s[0]) if isinstance(s, (list, tuple)) else int(s)
+def _conv_is_winograd_eligible(node: Node, graph: Graph) -> bool:
+    strides = list(node.attributes.get("strides", [1, 1]))
+    dilations = list(node.attributes.get("dilations", [1, 1]))
+    group = int(node.attributes.get("group", 1))
+    return (
+        _conv_has_3x3(node, graph)
+        and strides in ([1], [1, 1])
+        and dilations in ([1], [1, 1])
+        and group == 1
+    )
 
 
 def decompose_Conv(node: Node, graph: Graph, precision: PrecisionProfile,
@@ -265,16 +273,17 @@ def decompose_Conv(node: Node, graph: Graph, precision: PrecisionProfile,
     nid = node.id
     inp, weight = node.inputs[0], node.inputs[1]
     has_bias = len(node.inputs) >= 3 and node.inputs[2]
-    is_3x3_s1 = _conv_has_3x3(node) and _conv_stride(node) == 1
+    is_winograd_eligible = _conv_is_winograd_eligible(node, graph)
     op_params = {
-        "kernel_shape": list(node.attributes.get("kernel_shape", [])),
+        "kernel_shape": _conv_kernel_shape(node, graph),
+        "auto_pad": node.attributes.get("auto_pad", "NOTSET"),
         "pads": list(node.attributes.get("pads", [0, 0, 0, 0])),
         "strides": list(node.attributes.get("strides", [1, 1])),
         "dilations": list(node.attributes.get("dilations", [1, 1])),
         "group": int(node.attributes.get("group", 1)),
     }
 
-    if is_3x3_s1 and use_winograd:
+    if is_winograd_eligible and use_winograd:
         winograd_out = _inter_name(nid, 0) if has_bias else list(node.outputs)[0]
         refs = [KernelSpecRef(kernel_name=_kernel_name("winograd_forward", precision),
                               inputs=[inp, weight],
@@ -283,7 +292,8 @@ def decompose_Conv(node: Node, graph: Graph, precision: PrecisionProfile,
         if has_bias:
             refs.append(KernelSpecRef(kernel_name=_kernel_name("add_bias", precision),
                                       inputs=[winograd_out, node.inputs[2]],
-                                      outputs=list(node.outputs)))
+                                      outputs=list(node.outputs),
+                                      operator_params={"bias_axis": 1}))
         return refs
     else:
         im2col_out = _inter_name(nid, 0)
@@ -291,15 +301,19 @@ def decompose_Conv(node: Node, graph: Graph, precision: PrecisionProfile,
         refs = [
             KernelSpecRef(kernel_name=_kernel_name("im2col", precision),
                           inputs=[inp], outputs=[im2col_out],
-                          operator_params=dict(op_params)),
+                          operator_params={**op_params,
+                                           "lowering_kind": "conv_im2col"}),
             KernelSpecRef(kernel_name=_kernel_name("matmul", precision),
                           inputs=[im2col_out, weight],
-                          outputs=[matmul_out] if has_bias else list(node.outputs)),
+                          outputs=[matmul_out] if has_bias else list(node.outputs),
+                          operator_params={**op_params,
+                                           "lowering_kind": "conv_contract"}),
         ]
         if has_bias:
             refs.append(KernelSpecRef(kernel_name=_kernel_name("add_bias", precision),
                                       inputs=[matmul_out, node.inputs[2]],
-                                      outputs=list(node.outputs)))
+                                      outputs=list(node.outputs),
+                                      operator_params={"bias_axis": 1}))
         return refs
 
 
@@ -319,19 +333,158 @@ def decompose_GlobalAveragePool(node: Node, graph: Graph, precision: PrecisionPr
     ]
 
 
+# ── C3.3 executable fusion lowerings ──────────
+
+
+def decompose_FusedMatMulBias(
+    node: Node, graph: Graph, precision: PrecisionProfile,
+) -> List[KernelSpecRef]:
+    """One generated MatMul+bias epilogue kernel."""
+    return [KernelSpecRef(
+        kernel_name="fused_matmul_bias_f32",
+        inputs=list(node.inputs),
+        outputs=list(node.outputs),
+        operator_params=dict(node.attributes),
+    )]
+
+
+def decompose_FusedConv2dBatchNorm(
+    node: Node, graph: Graph, precision: PrecisionProfile,
+) -> List[KernelSpecRef]:
+    """Use one Conv lowering after runtime initializer folding.
+
+    Before the executor materializes folded parameters, retain an explicit BN
+    step so graph-only launch accounting never treats an unfurled Conv+BN as a
+    single physical kernel.
+    """
+    if node.attributes.get("bn_folded"):
+        return decompose_Conv(node, graph, precision, use_winograd=True)
+    offset = int(node.attributes.get("bn_parameter_offset", len(node.inputs)))
+    conv_out = _inter_name(node.id, 0)
+    conv_node = Node(
+        id=f"{node.id}_conv",
+        name=node.name,
+        op_type="Conv",
+        inputs=list(node.inputs[:offset]),
+        outputs=[conv_out],
+        attributes=dict(node.attributes),
+        domain=node.domain,
+    )
+    refs = decompose_Conv(conv_node, graph, precision, use_winograd=True)
+    refs.append(KernelSpecRef(
+        kernel_name="batchnorm_f32",
+        inputs=[conv_out] + list(node.inputs[offset:offset + 4]),
+        outputs=list(node.outputs),
+        operator_params={"epsilon": node.attributes.get("bn_epsilon", 1e-5)},
+    ))
+    return refs
+
+
+def decompose_FusedEWChain(
+    node: Node, graph: Graph, precision: PrecisionProfile,
+) -> List[KernelSpecRef]:
+    return [KernelSpecRef(
+        kernel_name="fused_ew_f32",
+        inputs=list(node.inputs),
+        outputs=list(node.outputs),
+        operator_params=dict(node.attributes),
+    )]
+
+
+def decompose_FusedSoftmaxDropout(
+    node: Node, graph: Graph, precision: PrecisionProfile,
+) -> List[KernelSpecRef]:
+    return [KernelSpecRef(
+        kernel_name="fused_softmax_f32",
+        inputs=list(node.inputs),
+        outputs=list(node.outputs),
+        operator_params=dict(node.attributes),
+    )]
+
+
+def decompose_FusedResidualNorm(
+    node: Node, graph: Graph, precision: PrecisionProfile,
+) -> List[KernelSpecRef]:
+    return [KernelSpecRef(
+        kernel_name="fused_residual_norm_f32",
+        inputs=list(node.inputs),
+        outputs=list(node.outputs),
+        operator_params=dict(node.attributes),
+    )]
+
+
+def _single_fused_kernel(node: Node, kernel_name: str) -> List[KernelSpecRef]:
+    return [KernelSpecRef(
+        kernel_name=kernel_name,
+        inputs=list(node.inputs),
+        outputs=list(node.outputs),
+        operator_params=dict(node.attributes),
+    )]
+
+
+def decompose_FusedGemmEpilogue(
+    node: Node, graph: Graph, precision: PrecisionProfile,
+) -> List[KernelSpecRef]:
+    return _single_fused_kernel(node, "fused_gemm_epilogue_f32")
+
+
+def decompose_FusedConvActivation(
+    node: Node, graph: Graph, precision: PrecisionProfile,
+) -> List[KernelSpecRef]:
+    return _single_fused_kernel(node, "fused_conv_activation_f32")
+
+
+def decompose_FusedConvResidualActivation(
+    node: Node, graph: Graph, precision: PrecisionProfile,
+) -> List[KernelSpecRef]:
+    return _single_fused_kernel(node, "fused_conv_residual_activation_f32")
+
+
+def decompose_FusedAttentionScores(
+    node: Node, graph: Graph, precision: PrecisionProfile,
+) -> List[KernelSpecRef]:
+    return _single_fused_kernel(node, "fused_attention_scores_f32")
+
+
+def decompose_FusedLayerNormalization(
+    node: Node, graph: Graph, precision: PrecisionProfile,
+) -> List[KernelSpecRef]:
+    return _single_fused_kernel(node, "fused_layer_norm_f32")
+
+
+def decompose_FusedTransposeReshape(
+    node: Node, graph: Graph, precision: PrecisionProfile,
+) -> List[KernelSpecRef]:
+    return _single_fused_kernel(node, "fused_transpose_reshape_f32")
+
+
 # ── Dispatch table ────────────────────────────
 
 DECOMPOSE_DISPATCH = {
     "Add": decompose_Add,
     "Constant": decompose_Constant,
     "Conv": decompose_Conv,
+    "Conv2d": decompose_Conv,
     "Div": decompose_Div,
     "Erf": decompose_Erf,
     "Flatten": decompose_Flatten,
+    "FusedConv2dBatchNorm": decompose_FusedConv2dBatchNorm,
+    "FusedConvActivation": decompose_FusedConvActivation,
+    "FusedConvResidualActivation": decompose_FusedConvResidualActivation,
+    "FusedAttentionScores": decompose_FusedAttentionScores,
+    "FusedEWChain": decompose_FusedEWChain,
+    "FusedGemmEpilogue": decompose_FusedGemmEpilogue,
+    "FusedLayerNormalization": decompose_FusedLayerNormalization,
+    "FusedTransposeReshape": decompose_FusedTransposeReshape,
+    "FusedMatMulBias": decompose_FusedMatMulBias,
+    "FusedResidualNorm": decompose_FusedResidualNorm,
+    "FusedSoftmaxDropout": decompose_FusedSoftmaxDropout,
     "Gather": decompose_Gather,
     "Gemm": decompose_Gemm,
     "GlobalAveragePool": decompose_GlobalAveragePool,
     "LayerNormalization": decompose_LayerNormalization,
+    "LayerNorm": decompose_LayerNormalization,
+    "Linear": decompose_Linear,
     "MatMul": decompose_MatMul,
     "Mul": decompose_Mul,
     "Relu": decompose_Relu,

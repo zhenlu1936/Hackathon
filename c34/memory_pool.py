@@ -159,6 +159,18 @@ class DeviceMemoryPool:
             free_list_blocks=len(self._free_list),
         )
 
+    def describe(self, slot_id: int) -> Tuple[int, int]:
+        """Return ``(offset_bytes, capacity_bytes)`` for an active slot.
+
+        The scheduler stores this physical range in every Allocation so the
+        CuPy runtime can construct tensor views into one device arena instead
+        of allocating an unrelated array per logical tensor.
+        """
+        block = self._active.get(slot_id)
+        if block is None:
+            raise ValueError(f"Slot {slot_id} is not allocated")
+        return block.offset, block.size_bytes
+
     # ── Reuse logic ────────────────────────────────────────────────
 
     def _try_reuse(self, size_bytes: int, alignment: int) -> int:

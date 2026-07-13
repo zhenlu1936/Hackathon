@@ -42,15 +42,29 @@ class KernelTuningParams:
     grid_z: int = 1
     smem_bytes: int = 0
 
-    def is_valid(self, max_threads: int, max_smem: int) -> bool:
+    def is_valid(
+        self,
+        max_threads: int,
+        max_smem: int,
+        max_block_dim: Optional[int] = None,
+        max_grid_dim: Optional[int] = None,
+    ) -> bool:
         threads = self.block_x * self.block_y * self.block_z
         checks = (
             0 < threads <= max_threads,
             self.block_x > 0,
+            self.block_y > 0,
+            self.block_z > 0,
             self.grid_x > 0,
             self.grid_y > 0,
             self.grid_z > 0,
             self.smem_bytes == -1 or 0 <= self.smem_bytes <= max_smem,
+            max_block_dim is None or max(
+                self.block_x, self.block_y, self.block_z
+            ) <= max_block_dim,
+            max_grid_dim is None or max(
+                self.grid_x, self.grid_y, self.grid_z
+            ) <= max_grid_dim,
         )
         return all(checks)
 
@@ -73,6 +87,10 @@ class KernelSpecRef:
     # Populated by the decomposition functions with the originating
     # node's ONNX attributes plus any derived parameters.
     operator_params: Dict[str, Any] = field(default_factory=dict)
+    # Selected profile is attached by Strategy.decompose().  Keeping it on the
+    # reference prevents later planning/runtime stages from guessing precision
+    # from a kernel-name suffix.
+    precision_profile: Optional[PrecisionProfile] = None
 
     @property
     def is_tunable(self) -> bool:

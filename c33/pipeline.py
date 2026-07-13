@@ -24,8 +24,11 @@ from c33.fusion import (
     fuse_elementwise_chain,
     fuse_softmax_dropout,
     fuse_residual_norm,
-    fuse_compute_activation,
-    fuse_execution_regions,
+    fuse_gemm_epilogues,
+    fuse_conv_epilogues,
+    fuse_attention_scores,
+    fuse_transpose_reshape,
+    fuse_layer_normalization_kernels,
     cleanup_dead_tensors,
     ELEMENTWISE_OPS,
 )
@@ -43,17 +46,26 @@ def _count_launches(graph: Graph) -> int:
         node = graph.nodes.get(nid)
         if node is None:
             continue
-        launches += len(strategy.decompose(node, graph))
+        for kernel in strategy.decompose(node, graph):
+            # Constants are uploaded before graph execution.  The C3.5
+            # executors return immediately for Constant nodes, so their
+            # metadata KernelSpecRef is not a physical device launch.
+            if kernel.kernel_name == "constant":
+                continue
+            launches += 1
 
     return max(launches, 1)
 
 
 def _count_buffers(graph: Graph) -> int:
-    """Count intermediate buffers (tensors that are not inputs or initializers).
+    """Count graph and C3.2-lowering intermediate buffers.
 
-    This includes intermediate tensors between nodes, excluding graph inputs,
-    graph outputs, initializers, and constants.
+    Graph edges and named outputs internal to multi-kernel decompositions both
+    require logical storage in the executable lowering.  The old graph-only
+    count omitted Gemm/Conv/Softmax/LayerNorm workspaces and therefore did not
+    use the same lowering model as launch counting.
     """
+    from c32.strategy import ExecutionMode, Strategy
     input_names = {t.name for t in graph.inputs}
     output_names = {t.name for t in graph.outputs}
 
@@ -74,6 +86,20 @@ def _count_buffers(graph: Graph) -> int:
             continue
         buffers += 1
 
+    strategy = Strategy(mode=ExecutionMode.FULL_FP32)
+    for node_id in graph.node_order:
+        node = graph.nodes.get(node_id)
+        if node is None:
+            continue
+        node_outputs = {name for name in node.outputs if name}
+        lowering_intermediates = {
+            output
+            for kernel in strategy.decompose(node, graph)
+            for output in kernel.outputs
+            if output and output not in node_outputs
+        }
+        buffers += len(lowering_intermediates)
+
     return max(buffers, 0)
 
 
@@ -83,11 +109,14 @@ def _count_buffers(graph: Graph) -> int:
 PASS_ORDER = [
     ("Conv2dBatchNorm", fuse_conv_batchnorm),
     ("MatMulBias", fuse_matmul_bias),
-    ("ComputeActivation", fuse_compute_activation),
     ("ResidualNorm", fuse_residual_norm),
     ("SoftmaxDropout", fuse_softmax_dropout),
+    ("AttentionScores", fuse_attention_scores),
+    ("TransposeReshape", fuse_transpose_reshape),
+    ("GemmEpilogue", fuse_gemm_epilogues),
+    ("ConvEpilogue", fuse_conv_epilogues),
+    ("LayerNormalizationKernel", fuse_layer_normalization_kernels),
     ("EWChain", fuse_elementwise_chain),
-    ("ExecutionRegion", fuse_execution_regions),
 ]
 
 

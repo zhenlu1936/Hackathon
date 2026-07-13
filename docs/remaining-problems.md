@@ -1,9 +1,12 @@
 # Known limitations and completion gates
 
-Updated: 2026-07-13 (three-model H200 black-box review) — #2, #6, and #46 are
-resolved for the released CuPy graph path; direct C3.2 kernel-step execution
-remains #1/#36, process-accounted NVML memory remains #39, and physical fusion
-remains #27
+Updated: 2026-07-13 (executable C3.3 fusion revision) — generated Gemm, Conv,
+attention, LayerNormalization, elementwise, residual-normalization, and layout
+kernels write directly into planned output views. All released graphs now clear
+the local 60% launch/buffer anchors, but the exact revision still needs H200
+compilation, numerical comparison, and observed-launch evidence. The
+superseding H200 rerun remains #40; direct general C3.2 kernel-step execution
+remains #1/#36.
 
 This release register follows `.specification/general_requirements.md` first and
 `.specification/scoring.md` second. A check closes a scoring item only when it
@@ -13,18 +16,15 @@ exercises the same artifact and backend evaluated by the organizer.
 
 | # | Priority | Area | Remaining problem | Scoring consequence |
 |---|----------|------|-------------------|--------------------|
-| 1 | P0 | Architecture | C3.2 kernel steps and C3.4 plan operations do not directly drive H200 execution | C3.2/C3.4 implementation claims remain partly structural |
-| 2 | ~~P0~~ | ~~Correctness~~ | The corrected FULL_FP32 graph-path gate passed all three released models on H200 with `top1_match=1.0` and maximum absolute differences at or below `8.88e-06` | ~~C3.2 hard numerical condition unproven~~ → Resolved for the connected high-level CuPy path; direct kernel-step execution remains #1/#36 |
+| 1 | P0 | Architecture | C3.4 now drives a high-level-node CuPy timeline, but individual C3.2 kernel references still do not drive H200 execution | The direct decomposed-kernel chain remains incomplete |
 | 3 | P1 | C3.2 precision | Mixed routing covers four precisions structurally, but FP8/FP4 H200 kernels are not numerically qualified | D1 routing signals pass; low-precision correctness remains unproven |
-| 4 | P1 | C3.2 hardware | Default target is an unverified capability profile rather than an AEC query | Capability and D5 claims may be false |
-| 5 | ~~P1~~ | ~~C3.3 structural reduction~~ | Bounded, topology-driven execution regions exceed the published 60% launch/logical-buffer thresholds on all three released graphs | ~~F2/F3 structural threshold unmet~~ → Resolved locally; not physical H200-launch evidence |
-| 6 | ~~P1~~ | ~~C3.3 correctness~~ | The revised CuPy-only optimized graph passed full-dataset golden comparison for all three released models; BN values remain unavailable and physical fused-kernel lowering is tracked by #27 | ~~Released-graph F4 numerical evidence incomplete~~ → Resolved for the current high-level CuPy path |
-| 7 | P1 | C3.4 runtime | Allocations, copies, streams, and events are metadata rather than the operations driving CuPy | Code-review complete-chain condition is unmet |
-| 8 | P1 | C3.4 concurrency | Linear lifetime reuse ignores stream happens-before; plan has separate transfer/kernel lists | Reuse safety and prefetch overlap are unproven |
+| 4 | P1 | C3.2 hardware | A CuPy device-query path exists, but it has not been activated and recorded on the organizer H200; the default coverage profile remains unverified | Capability and D5 claims remain target-unproven |
+| 5 | P1 | C3.3 reduction | Connected generated kernels clear all local 60% anchors, but this revision has not compiled or run on H200 | F2/F3 source path is fixed; target numerical/profiler evidence remains required |
+| 7 | P1 | C3.4 runtime | Persistent streams/events and direct planned writes for generated fused kernels are source-connected, but other high-level operators retain temporaries and the revision has not run on H200 | Complete-chain and actual-peak claims remain unproven |
+| 8 | P1 | C3.4 concurrency | Reuse dependencies, persistent physical streams, reusable plan events, and a unified timeline are implemented, but target ordering/overlap has not been traced | Reuse safety and prefetch overlap remain target-unproven |
 | 9 | P1 | C3.5 integration | CuPy executes on the AEC H200 but evaluates high-level nodes instead of C3.2 kernel steps | End-to-end device execution works; compiler-plan integration remains incomplete |
 | 10 | P0 | Submission | Direct `google.protobuf` native-server verification and archive cleanliness are not proven | Dependency/reproducibility portions of Integrity Rule 6 remain release blockers; source and AI disclosures are current |
 | 12 | P2 | Evaluator API | Referenced C3.2/C3.3 benchmark is absent | Hidden API compatibility is unknown |
-| 46 | ~~P0~~ | ~~C3.5 validation~~ | The revised CuPy-only CLI and standard runner passed all three full released datasets on the remote H200; cold wall times were recorded, while process-accounted NVML memory remains #39 | ~~Current end-to-end correctness unproven~~ → Resolved for released models |
 
 ## H200 execution integration
 
@@ -42,11 +42,12 @@ Completion evidence:
 17. `cupy.allclose(rtol=1e-3, atol=1e-3)` passes; MLP top-1 is at least 98% and ResNet top-1 at least 85%.
 18. Confirm by source audit that no non-CuPy numerical fallback remains.
 
-Release status: C3.5 optimizes the C3.1 graph with C3.3, builds a
-C3.2-decomposed C3.4 plan for each batch size, rejects invalid or
-graph-incomplete plans, and uses the plan's node order for CuPy execution by
-default on the designated remote H200 AEC device. The unresolved boundary is
-direct execution of C3.2 kernel steps and C3.4 plan operations.
+Release status: C3.5 optimizes the C3.1 graph with C3.3, records the C3.2
+decomposition as review metadata, and builds a C3.4 high-level-node timeline
+for each batch size. The new CuPy executor consumes that timeline, one device
+arena, allocation views, copy/compute streams, and events in source, but the
+revision has not run on H200. Direct C3.2 kernel-step execution remains the
+architectural boundary.
 
 ## C3.2 backend qualification
 
@@ -54,47 +55,115 @@ Verified positives: deterministic routing, canonical names, connected Gemm outpu
 
 Remaining work:
 
-19. Query the actual H200/MIG capability instead of relying on an unverified profile.
+19. Run `c32.api.activate_cupy_hardware()` on the actual H200/MIG target,
+    record its source, limits, and compute capability, and leave FP4 disabled
+    unless an executable qualified AEC FP4/W4A16 path is present.
 20. Implement every claimed f32/f16/f8/f4 kernel.
 21. Implement and numerically qualify the selected FP8 and W4A16 kernels on the H200; the current routing is shape/semantics based and deterministic.
 22. Demonstrate every selected profile within the numerical thresholds.
-23. Add executable non-default-attribute tests for the 17 operators.
-24. Validate block, grid, and shared memory against the target.
+23. Run the executable non-default-attribute suite on CuPy 14.1.1/H200. The
+    host semantic shim passes 16 regression methods covering the published
+    17-operator union, but host execution is not target-backend evidence.
+24. Validate block, grid, and shared memory against the target. Local contract
+    tests now enforce threads-per-block, block-x, grid-x, and shared-memory
+    limits, but the discovered H200 values still need the target run in item 19.
 
-The C3.2 smoke script now prints `14.17/15`: D1 is 3.0/3.0 with fp32/fp16/fp8/fp4 coverage, while D3 remains 2.17/3.0. This is structural evidence and still partly depends on the unverified capability profile.
+The C3.2 smoke script now prints `14.17/15`: D1 is 3.0/3.0 with fp32/fp16/fp8/fp4 coverage, while D3 remains 2.17/3.0. The final local rerun passes all seven dependency-light C3.2 contract regressions; the synthetic downstream plan also validates with complete tuning and precision metadata. Repository compilation, diff checks, and the final cross-record C3.2 consistency search pass. The implementation intentionally does not insert redundant copy kernels solely to make every single-kernel node report an intermediate; that would inflate launch counts and misrepresent executable work. This remains structural evidence and still partly depends on the unverified capability profile.
 
 ## C3.3 reduction and backend correctness
 
-| Model | Launch reduction | Buffer reduction | 60% target met? |
-|---|---:|---:|---|
-| MLP | 88.9% | 100.0% | Yes (structural) |
-| ResNet-18 | 84.0% | 76.6% | Yes (structural) |
-| Transformer | 74.3% | 73.5% | Yes (structural) |
+Current local evidence: Python compilation and diff checks pass, C3.2 remains
+`14.17/15`, `python3 -m c33.test_c33` passes `68/68` with a written-rubric
+structural total of `15.00/15.0`, and the focused executable-fusion suite passes
+`8/8`. The current same-lowering counts are MLP `9 -> 3` launches and `8 -> 2`
+buffers, ResNet-18 `75 -> 28` and `74 -> 27`, and Transformer `217 -> 79` and
+`224 -> 86`. Corresponding reductions are `66.7%/75.0%`, `62.7%/63.5%`, and
+`63.6%/61.6%`.
 
-These values are the published C3.3 graph-level metrics. The CuPy reference
-lowering executes each retained region program operation by operation; it does
-not yet establish one physical H200 kernel per region.
+The implementation uses generated single-launch kernels and does not re-enable
+the sequential bounded-region utility. Buffer counting now includes named
+C3.2 lowering intermediates, and Constant metadata references count as zero
+launches because the runtime preloads them. Optimized graphs build complete
+C3.4 plans locally. CuPy is unavailable on this machine, so the expanded device
+numerical suite and all three optimized models still require H200 execution.
+
+The self-test applies the published F2/F3 formula per MLP and ResNet-18 and
+prints both results. Since the referenced organizer benchmark is absent and
+cross-model aggregation is unspecified, its mean is explicitly a local
+self-score convention rather than a claim about the unreleased evaluator.
+
+The earlier MLP `88.9%/100.0%`, ResNet-18 `84.0%/76.6%`, and Transformer
+`74.3%/73.5%` launch/logical-buffer figures are historical and no longer
+current release evidence. They counted `FusedExecutionRegion` as one launch
+while its executor ran the retained operations sequentially. The default
+pipeline no longer enables that pass or the sequential compute-activation
+rewrite.
+
+Current implementation state:
+
+- `FusedEWChain` uses one runtime-generated CuPy `ElementwiseKernel`.
+- `FusedSoftmaxDropout` uses one runtime-generated CUDA reduction kernel for
+  arbitrary valid axes.
+- `FusedResidualNorm` uses one runtime-generated CUDA reduction/normalization
+  kernel for equal-shaped residual inputs.
+- `FusedMatMulBias` and `FusedGemmEpilogue` use one generated FP32 GEMM kernel
+  with broadcast bias and optional absorbed Flatten/Relu semantics.
+- `FusedConvActivation` and `FusedConvResidualActivation` use one direct NCHW
+  convolution kernel with bias, optional residual, and Relu epilogues.
+- `FusedAttentionScores` performs rank-four MatMul, scalar division, broadcast
+  mask Add, and last-axis Softmax in one generated kernel.
+- `FusedLayerNormalization` and `FusedTransposeReshape` have bounded generated
+  kernel ABIs and direct planned-output writes.
+- explicit Conv+BN parameters are folded in the executor's CuPy initializer
+  store before C3.4 planning, including the planned executor's device-copy
+  path; the public ResNet still has no recoverable BN.
+- the general region utility remains available for ABI testing but is not part
+  of `GraphPassPipeline` without a single-kernel lowering.
+
+Run the expanded device numerical tests and all three released graphs on H200,
+then compare unfused and fused executions with a launch profiler and confirm
+F2/F3. No profiler is declared in `environments.txt`, so observed-launch
+evidence remains blocked under #27.
 
 Required work:
 
-25. Retain initializer payloads or add an initializer store so Conv+BN actually folds weights/bias.
+25. Run the executor-side Conv+BN initializer fold on the H200 and confirm
+    `max_abs_diff <= 1e-3`; implementation is present, but this revision has
+    only local source and structural evidence.
 26. Extend first-batch original-versus-optimized qualification to the decomposed H200 kernel path; any violation makes F4 zero.
-27. Lower every fused node to one real H200 kernel or a truthful executable sequence. A fused label alone is not a saved launch.
-28. ~~Improve general fusion/lowering toward the 60% F2/F3 structural targets~~ → Resolved with deterministic bounded execution regions; MLP 88.9%/100.0%, ResNet 84.0%/76.6%, Transformer 74.3%/73.5% launch/logical-buffer reduction.
-29. ~~Cap and repair self-test arithmetic; `9.40/8.6` is invalid~~ → Resolved.
+27. Compile and validate the generated Gemm/MatMul, Conv/residual, attention,
+    normalization, elementwise, and layout kernels on H200. Unsupported general
+    regions remain disabled. Closure requires baseline-versus-fused numerical
+    and profiler evidence whose observed launch counts agree with the reported
+    lowerings.
 
 ## C3.4 runtime integration
 
-Corrected plans now have complete bindings and consistent transfer/wait events. This closes the earlier empty-binding and unsignalled-event defects, but not the five code-review features.
+Corrected plans now have complete bindings, a unified action timeline, explicit
+reuse happens-before dependencies, and consistent transfer/wait events. The
+CuPy source path consumes those artifacts, caches each plan's arena, retains
+immutable model tensors across batch plans, reuses physical streams by logical
+stream ID, and reuses plan events after synchronization. The local
+12-configuration plan validation passes. Bounded per-batch pool telemetry is
+connected to the C3.5 backend evidence.
+Target execution is still unverified, input arrays enter the CLI through
+`cupy.load` before the planned copy, and high-level operators may allocate
+temporary device outputs outside the arena before copying results into their
+planned views. Generated C3.3 kernels write directly into planned views, and
+the generic path avoids a redundant contiguous copy.
 
 Required work:
 
-30. Make C3.4 pool slots drive the CuPy/H200 device allocations and frees.
-31. Put alloc, H2D, kernel, event, and D2H operations in one executable timeline.
+30. Run the arena/view allocation path on H200 and measure actual allocations;
+    verify persistent-stream pool reuse and remove or account for the remaining
+    high-level operator temporaries that escape the arena.
+31. Qualify the new alloc, H2D/D2D, kernel, event, D2H, and free timeline on
+    H200, including failure propagation and trace-to-plan agreement.
 32. Place next-layer weight copies near preceding compute and capture a trace proving overlap.
-33. Base reuse on happens-before across streams, not only linear indices.
-34. Execute actual streams/events.
-35. ~~Repair the self-score cap; `10.85/10` is invalid despite 505 structural checks~~ → Resolved (capped at `10.00/10.0`).
+33. Qualify the new reuse happens-before dependencies on real H200 streams; the
+    plan-level overlap and event checks pass locally.
+34. Capture H200 evidence that the actual CuPy streams/events execute in the
+    planned order and that intended copy/compute overlap occurs.
 
 ## C3.5 evaluator behavior
 
@@ -106,17 +175,26 @@ executing the individual decomposed C3.2 kernels.
 Remaining work:
 
 36. Replace high-level array-operator execution with individual C3.2 kernel steps and C3.4 physical bindings on the H200.
-37. ~~Preserve required intermediate dtypes and represent omitted optional inputs explicitly instead of scalar FP32 zero~~ → Resolved (passes `None` instead of FP32 zero).
-38. Test non-default attributes and hidden valid shapes for all operators.
+38. Run `C35Opset17AttributeTests` on CuPy 14.1.1/H200 and then rerun all three
+    released models. The implemented suite already covers all 17 operators,
+    including Flatten axes, Conv dilation/`auto_pad`/groups, opset-17 Split
+    sizes, multi-output LayerNormalization, dtype-preserving Gather, Constant
+    scalar/vector forms, broadcasting, and layout attributes; all 16 methods
+    pass with the host semantic shim.
 39. Obtain process-accounted NVML peak GPU memory on the target. Cold wall time
     is now measured, but MIG process accounting did not observe the child and
     the report therefore used labeled CuPy-pool reservation proxies.
-40. Make the submitted kernel, allocation, stream, and event plans drive the existing H200 execution path.
-46. ~~Run MLP, ResNet, and Transformer through `./run_c35.sh` on the remote
-    H200, record golden/accuracy results, confirm the CuPy-only report schema,
-    and verify the registered command exposes only the required C3.5
-    arguments.~~ Resolved by `docs/c35_reports/1.json`; CLI parser inspection
-    remains part of the recorded CuPy-only conversion evidence.
+40. Rerun all three models through the corrected plan-driven
+    arena/stream/event path on H200 and confirm the execution trace matches the
+    submitted plan. Confirm that `runtime_stream_objects` stays bounded while
+    `batch_count` reaches 40 at batch size 256 and that CuPy-pool reservation no
+    longer grows once per batch. Report 3 exposed that dynamic tensor sizing used FP32's
+    four-byte width for the INT64 Transformer input, producing capacities of
+    `192` bytes for a required `288` and `18432` for a required `36864`. The
+    planner now derives byte width from ONNX dtype and handles both symbolic
+    and `-1` batch dimensions; local dependency-light checks prove `288` bytes
+    for `[2, 18]` INT64, but only the H200 rerun closes this item. This does not
+    by itself close direct C3.2 kernel execution under #36.
 
 Written C3.5 scoring is correctness/accuracy 15, time 25, memory 10. Use the written rubric until the conflicting image is clarified.
 
@@ -130,11 +208,6 @@ Before submission, provide:
 42. Complete exact versions, licenses, purposes, and call boundaries for all
     used modules. The server-native `nvidia-smi` boundary is now recorded; do
     not infer an exact CuPy distribution name from the importable module alone.
-43. ~~Review academic/public-source attribution against the implementation~~ →
-    Resolved for this revision: ONNX, Abramowitz & Stegun, TVM, DNNFusion,
-    MLIR Linalg, and NVIDIA CUDA Graphs are disclosed.
-44. ~~Disclose OpenAI Codex as well as GitHub Copilot~~ → Resolved; keep the
-    disclosure current after every later assisted revision.
 45. Build the actual submission archive and inspect its file list for virtual
     environments, caches, bytecode, reports, generated plans/outputs,
     `.agents`, `.specification`, and development-only assets. `.gitignore` is
@@ -146,27 +219,52 @@ The local macOS ARM environment is not evidence of parity with the specified Lin
 
 - C3.1: 7/7 tests pass.
 - C3.2: structural script completes at 14.17/15; D1 is 3.0/3.0; five precision-policy and four independent scoring regressions pass.
-- C3.2 FULL_FP32 H200 graph-path gate: all 219 nodes select FP32 and decompose;
-  MLP, ResNet-18, and Transformer two-sample comparisons pass `allclose` with
-  `top1_match=1.0` and maximum absolute differences `2.86e-06`, `1.67e-06`,
-  and `8.88e-06`. This is not direct C3.2 kernel-step execution evidence.
-- C3.3: 64 structural checks pass, including the bounded-region ABI and
-  released-graph threshold evidence; independent EW-chain and Conv+BN
-  numerical regressions are historical until rerun on H200.
-- C3.4: 505 structural checks pass; all 12 public plan configurations validate; readiness waits use signalled transfer events.
-- The standard CuPy-only H200 report passes all three full released datasets:
-  MLP accuracy `0.9835`, max diff `1.53e-05`, wall `1.093 s`; ResNet accuracy
-  `0.9351`, max diff `8.58e-06`, wall `7.877 s`; Transformer max diff
-  `3.15e-05`, wall `1.743 s`.
+- C3.2 FULL_FP32 report 3: all 219 nodes select FP32 and decompose. MLP and
+  ResNet-18 pass `allclose` with `top1_match=1.0` and maximum absolute
+  differences `2.86e-06` and `1.67e-06`; Transformer did not reach numerical
+  comparison because its dynamic INT64 input allocation was half-sized. The
+  source correction is locally checked, but the earlier three-model H200 pass
+  is historical until report 3 is superseded by a rerun. This is not direct
+  C3.2 kernel-step execution evidence.
+- C3.3 current local evidence: the self-test passes `68/68` and reports
+  `15.00/15.0` structurally; the focused executable-fusion suite passes `8/8`,
+  and all released-model launch/buffer reductions exceed 60%. The historical
+  bounded-region H200 figures remain superseded. The generated kernels and
+  exact current graphs still require H200 compilation, numerical comparison,
+  and observed-launch evidence.
+- C3.4: the final local rerun passes 387/387; all 12 public plan configurations
+  validate, timeline coverage is complete, and readiness/reuse waits use
+  signalled events. The dedicated executable-timeline contract suite also
+  passes 6/6, with Python compilation and diff checks clean. This remains
+  structural rather than H200 runtime evidence.
+- C3.5 operator semantics: 16 methods covering the full 17-operator union pass
+  with a test-only host array shim. This validates control/shape semantics but
+  does not replace the required CuPy 14.1.1/H200 rerun.
+- Standard CuPy-only H200 report 3 passes MLP (accuracy `0.9835`, max diff
+  `1.53e-05`) and ResNet-18 (accuracy `0.9351`, max diff `8.58e-06`), but its
+  Transformer process exits on the same dynamic-INT64 allocation error. Older
+  three-model reports remain historical rather than current-revision evidence.
+- A later user-supplied pre-fix H200 transcript passes all three standard runs
+  after the INT64 correction: MLP accuracy `0.9835`, ResNet-18 accuracy
+  `0.9351`, and maximum absolute differences `1.53e-05`, `8.58e-06`, and
+  `3.24e-05`. It also exposes the CuPy-pool reservation regression addressed by
+  the new persistent-stream source change. Because that transcript predates the
+  source fix, it is correctness evidence for the input-sizing revision rather
+  than post-fix performance or memory evidence.
 - The report's `nvidia-smi` sampler did not observe the GPU child process;
   memory evidence is from labeled CuPy-pool reservations, so official
   process-accounted NVML peak memory remains open under #39.
-- Independent scoring and cross-stage regressions still need a current explicit
-  server-side test log if their individual results are to be claimed.
+- The superseding H200 transcript passes both cross-stage tests. After the
+  deterministic fixture replacement, all four scoring regressions pass on
+  CuPy 14.1.1 in `1.162 s`, including executable Conv+BN fusion.
+- After executable permission was restored, the exact bounded-region revision's
+  full C3.5 workflow passed: MLP accuracy `0.9835`, max diff `1.53e-05`, wall
+  `0.993 s`; ResNet-18 accuracy `0.9351`, max diff `8.58e-06`, wall `7.699 s`;
+  Transformer max diff `3.15e-05`, wall `1.570 s`. The report used CuPy-pool
+  memory figures, so process-accounted NVML evidence remains #39.
 - After moving all repository references to the organizer-owned model directory,
-  local Python compilation, C3.1 plus precision-policy unit tests (`12/12`),
-  C3.2 structural scoring (`14.17/15`), C3.3 (`64/64`), and C3.4 (`505/505`)
-  pass. The C3.2 numerical gate correctly skips without a local CUDA device.
+  the historical revision passed C3.1, C3.2, C3.3, and C3.4 structural checks.
+  Current per-revision evidence is recorded separately above.
 - Submission instructions and disclosures are consolidated in the root
   `README.md`. Its C3.1/C3.5 templates and three-model pre-submission checks
   match `.specification/spec.md`; this documentation revision does not close
