@@ -13,6 +13,9 @@ from c35.executor import CrossStageReferencePipeline
 
 
 ROOT = Path(__file__).resolve().parents[1]
+MODELS = (
+    ROOT / ".specification" / "testcases" / "release_to_competitors" / "models"
+)
 TESTDATA = (
     ROOT / ".specification" / "testcases" / "release_to_competitors"
     / "testdata" / "c35"
@@ -32,7 +35,7 @@ class CrossStagePipelineTests(unittest.TestCase):
         expected_fusions = {"mlp": 0, "resnet": 1, "transformer": 1}
         for model, minimum_fusions in expected_fusions.items():
             with self.subTest(model=model):
-                model_path = ROOT / "models" / f"{model}_v1.onnx"
+                model_path = MODELS / f"{model}_v1.onnx"
                 pipeline = CrossStageReferencePipeline(
                     import_onnx(str(model_path)), str(model_path),
                     qualify_optimizations=True,
@@ -51,7 +54,7 @@ class CrossStagePipelineTests(unittest.TestCase):
                 )
 
     def test_planned_executor_rejects_plan_graph_mismatch(self) -> None:
-        model_path = ROOT / "models" / "mlp_v1.onnx"
+        model_path = MODELS / "mlp_v1.onnx"
         pipeline = CrossStageReferencePipeline(
             import_onnx(str(model_path)), str(model_path)
         )

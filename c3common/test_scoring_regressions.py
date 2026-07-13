@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 import unittest
 
 import cupy as cp
@@ -17,6 +18,12 @@ from c34.scheduler import ExecutionScheduler
 from c35.engine import execute_op, op_conv
 
 
+MODELS = (
+    Path(__file__).resolve().parents[1] / ".specification" / "testcases"
+    / "release_to_competitors" / "models"
+)
+
+
 class ScoringRegressionTests(unittest.TestCase):
     def test_direct_hardware_switch_updates_public_references(self) -> None:
         old = replace(c32_api.hardware)
@@ -29,7 +36,7 @@ class ScoringRegressionTests(unittest.TestCase):
             self.assertEqual(c32_api.hardware.name, "tiny")
             self.assertEqual(c32_api.strategy.hardware.name, "tiny")
 
-            graph = import_onnx("models/mlp_v1.onnx")
+            graph = import_onnx(str(MODELS / "mlp_v1.onnx"))
             node = next(n for n in graph.nodes.values() if n.op_type == "Gemm")
             precision = c32_api.strategy.select_precision(node, graph)
             ref = c32_api.strategy.decompose(node, graph, precision)[0]
@@ -82,7 +89,8 @@ class ScoringRegressionTests(unittest.TestCase):
     def test_all_public_execution_plans_have_complete_bindings(self) -> None:
         for model in ("mlp", "resnet", "transformer"):
             with self.subTest(model=model):
-                plan = ExecutionScheduler(import_onnx(f"models/{model}_v1.onnx")).build()
+                model_path = MODELS / f"{model}_v1.onnx"
+                plan = ExecutionScheduler(import_onnx(str(model_path))).build()
                 self.assertEqual(plan.validate(), [])
                 transfer_events = {
                     t.event_id for t in plan.transfers if t.event_id is not None

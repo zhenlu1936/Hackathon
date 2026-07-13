@@ -32,7 +32,7 @@ except Exception:
 
 MODELS_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "models",
+    ".specification", "testcases", "release_to_competitors", "models",
 )
 MODEL_PATHS = {
     "mlp": os.path.join(MODELS_DIR, "mlp_v1.onnx"),
@@ -126,7 +126,10 @@ def test_full_fp32_numerical(graphs: Dict[str, Graph]) -> float:
     # ── Step 2: Execute and compare against golden ────────────
     models_ok = 0
     for gname in ("mlp", "resnet", "transformer"):
-        model_path = ROOT / "models" / f"{gname}_v1.onnx"
+        model_path = (
+            ROOT / ".specification" / "testcases" / "release_to_competitors"
+            / "models" / f"{gname}_v1.onnx"
+        )
         golden_path = TESTDATA / f"{gname}_v1" / "golden" / "logits.npy"
 
         if not model_path.is_file() or not golden_path.is_file():

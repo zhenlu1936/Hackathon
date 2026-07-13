@@ -1,8 +1,9 @@
 # Known limitations and completion gates
 
-Updated: 2026-07-13 (H200 FULL_FP32 follow-up) — #2 is resolved by current
-three-model H200 golden comparisons; direct C3.2 kernel-step execution remains
-#1/#36, full-dataset validation remains #46, and physical fusion remains #27
+Updated: 2026-07-13 (three-model H200 black-box review) — #2, #6, and #46 are
+resolved for the released CuPy graph path; direct C3.2 kernel-step execution
+remains #1/#36, process-accounted NVML memory remains #39, and physical fusion
+remains #27
 
 This release register follows `.specification/general_requirements.md` first and
 `.specification/scoring.md` second. A check closes a scoring item only when it
@@ -17,13 +18,13 @@ exercises the same artifact and backend evaluated by the organizer.
 | 3 | P1 | C3.2 precision | Mixed routing covers four precisions structurally, but FP8/FP4 H200 kernels are not numerically qualified | D1 routing signals pass; low-precision correctness remains unproven |
 | 4 | P1 | C3.2 hardware | Default target is an unverified capability profile rather than an AEC query | Capability and D5 claims may be false |
 | 5 | ~~P1~~ | ~~C3.3 structural reduction~~ | Bounded, topology-driven execution regions exceed the published 60% launch/logical-buffer thresholds on all three released graphs | ~~F2/F3 structural threshold unmet~~ → Resolved locally; not physical H200-launch evidence |
-| 6 | P1 | C3.3 correctness | Earlier H200 runs passed MLP and ResNet, but the CuPy-only revision has not been rerun; BN values cannot be reconstructed and fused nodes are not single fused H200 kernels | F4/backend launch evidence is incomplete |
+| 6 | ~~P1~~ | ~~C3.3 correctness~~ | The revised CuPy-only optimized graph passed full-dataset golden comparison for all three released models; BN values remain unavailable and physical fused-kernel lowering is tracked by #27 | ~~Released-graph F4 numerical evidence incomplete~~ → Resolved for the current high-level CuPy path |
 | 7 | P1 | C3.4 runtime | Allocations, copies, streams, and events are metadata rather than the operations driving CuPy | Code-review complete-chain condition is unmet |
 | 8 | P1 | C3.4 concurrency | Linear lifetime reuse ignores stream happens-before; plan has separate transfer/kernel lists | Reuse safety and prefetch overlap are unproven |
 | 9 | P1 | C3.5 integration | CuPy executes on the AEC H200 but evaluates high-level nodes instead of C3.2 kernel steps | End-to-end device execution works; compiler-plan integration remains incomplete |
 | 10 | P0 | Submission | Direct `google.protobuf` native-server verification and archive cleanliness are not proven | Dependency/reproducibility portions of Integrity Rule 6 remain release blockers; source and AI disclosures are current |
 | 12 | P2 | Evaluator API | Referenced C3.2/C3.3 benchmark is absent | Hidden API compatibility is unknown |
-| 46 | P0 | C3.5 validation | The revised CuPy-only CLI, runner, serialization, and tests have not run on the remote H200 | Current end-to-end correctness and performance are unproven |
+| 46 | ~~P0~~ | ~~C3.5 validation~~ | The revised CuPy-only CLI and standard runner passed all three full released datasets on the remote H200; cold wall times were recorded, while process-accounted NVML memory remains #39 | ~~Current end-to-end correctness unproven~~ → Resolved for released models |
 
 ## H200 execution integration
 
@@ -107,12 +108,15 @@ Remaining work:
 36. Replace high-level array-operator execution with individual C3.2 kernel steps and C3.4 physical bindings on the H200.
 37. ~~Preserve required intermediate dtypes and represent omitted optional inputs explicitly instead of scalar FP32 zero~~ → Resolved (passes `None` instead of FP32 zero).
 38. Test non-default attributes and hidden valid shapes for all operators.
-39. Measure cold time and NVML per-process peak GPU memory on the target.
+39. Obtain process-accounted NVML peak GPU memory on the target. Cold wall time
+    is now measured, but MIG process accounting did not observe the child and
+    the report therefore used labeled CuPy-pool reservation proxies.
 40. Make the submitted kernel, allocation, stream, and event plans drive the existing H200 execution path.
-46. Run MLP, ResNet, and Transformer through `./run_c35.sh` on the remote H200,
-    record golden/accuracy results, confirm the CuPy-only report schema, and
-    verify the registered command and CLI help expose only the required C3.5
-    arguments.
+46. ~~Run MLP, ResNet, and Transformer through `./run_c35.sh` on the remote
+    H200, record golden/accuracy results, confirm the CuPy-only report schema,
+    and verify the registered command exposes only the required C3.5
+    arguments.~~ Resolved by `docs/c35_reports/1.json`; CLI parser inspection
+    remains part of the recorded CuPy-only conversion evidence.
 
 Written C3.5 scoring is correctness/accuracy 15, time 25, memory 10. Use the written rubric until the conflicting image is clarified.
 
@@ -150,16 +154,36 @@ The local macOS ARM environment is not evidence of parity with the specified Lin
   released-graph threshold evidence; independent EW-chain and Conv+BN
   numerical regressions are historical until rerun on H200.
 - C3.4: 505 structural checks pass; all 12 public plan configurations validate; readiness waits use signalled transfer events.
-- The earlier independent scoring and cross-stage regressions are historical;
-  their CuPy conversions require issue 46's H200 validation.
+- The standard CuPy-only H200 report passes all three full released datasets:
+  MLP accuracy `0.9835`, max diff `1.53e-05`, wall `1.093 s`; ResNet accuracy
+  `0.9351`, max diff `8.58e-06`, wall `7.877 s`; Transformer max diff
+  `3.15e-05`, wall `1.743 s`.
+- The report's `nvidia-smi` sampler did not observe the GPU child process;
+  memory evidence is from labeled CuPy-pool reservations, so official
+  process-accounted NVML peak memory remains open under #39.
+- Independent scoring and cross-stage regressions still need a current explicit
+  server-side test log if their individual results are to be claimed.
+- After moving all repository references to the organizer-owned model directory,
+  local Python compilation, C3.1 plus precision-policy unit tests (`12/12`),
+  C3.2 structural scoring (`14.17/15`), C3.3 (`64/64`), and C3.4 (`505/505`)
+  pass. The C3.2 numerical gate correctly skips without a local CUDA device.
+- Submission instructions and disclosures are consolidated in the root
+  `README.md`. Its C3.1/C3.5 templates and three-model pre-submission checks
+  match `.specification/spec.md`; this documentation revision does not close
+  native dependency verification (#41/#42) or archive inspection (#45). C3.1
+  help and archive-script syntax validate locally; C3.5 help remains H200-only
+  because importing its CLI intentionally requires CuPy.
 - The former CPU reference evidence is historical and no longer exercises a
   supported framework path after the CuPy-only conversion.
 - The CuPy-only framework fails closed when CuPy or a CUDA device is unavailable.
-- Pre-conversion H200 MIG runs confirmed CuPy 14.1.1, CuPy-pool evidence, and numerical gates for MLP (`0.9835`, max diff `1.53e-05`) and ResNet (`0.9351`, max diff `8.58e-06`). They exposed CuPy 14.1.1's asymmetric `Split` contract. These results are historical evidence only; issue 46 requires a fresh three-model run of the revised framework.
+- Pre-conversion H200 MIG runs confirmed CuPy 14.1.1, CuPy-pool evidence, and
+  numerical gates for MLP and ResNet, and exposed CuPy 14.1.1's asymmetric
+  `Split` contract. These results are historical; the later revised three-model
+  report is the current evidence recorded above.
 
 These positives do not override unresolved kernel-plan integration,
-low-precision qualification, physical H200 fusion, Transformer H200 validation, or
-submission-compliance items.
+low-precision qualification, physical H200 fusion, process-accounted NVML
+memory, or submission-compliance items.
 
 ## Organizer questions
 

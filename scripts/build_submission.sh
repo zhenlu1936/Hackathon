@@ -2,7 +2,7 @@
 # Build and verify a clean submission archive.
 #
 # Usage:
-#   bash scripts/build_submission.sh [--output submission.tar.gz]
+#   bash scripts/build_submission.sh [OUTPUT]
 #
 # This script:
 #   1. Exports the tracked files in HEAD (`export-ignore` attributes apply;
@@ -104,7 +104,6 @@ REQUIRED=(
     'c35/deploy.py'
     'c35/standard_runner.py'
     'c3common/__init__.py'
-    'docs/SUBMISSION.md'
     'README.md'
     'run_c35.sh'
 )

@@ -35,7 +35,7 @@ except ImportError:
 
 MODELS_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "models",
+    ".specification", "testcases", "release_to_competitors", "models",
 )
 MODEL_PATHS = {
     "mlp": os.path.join(MODELS_DIR, "mlp_v1.onnx"),

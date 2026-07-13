@@ -8,12 +8,12 @@ identified separately from execution evidence on the designated H200 AEC device.
 
 Last synchronized review: 2026-07-13.
 
-The implementation is **not submission-ready**. Structural validation was
-passing before the CuPy-only conversion, and earlier H200 runs passed MLP plus
-ResNet, but all three models now require a fresh server run against the revised
-runtime. Direct C3.2-kernel and C3.4-operation execution remains incomplete.
-Direct dependency verification and post-commit archive inspection also remain
-open release blockers. Public-source and AI-assistance disclosures are current.
+The implementation is **not submission-ready**. The revised CuPy-only runtime
+passes full-dataset golden and accuracy gates for all three released models on
+the H200. Direct C3.2-kernel and C3.4-operation execution remains incomplete.
+Process-accounted NVML peak memory, direct dependency verification, and
+post-commit archive inspection also remain open release blockers. Public-source
+and AI-assistance disclosures are current.
 
 ## Shared graph foundation
 
@@ -112,15 +112,19 @@ driving the CuPy execution path on the AEC H200.
   prefers process accounting and uses the pool reservation as a labeled MIG
   fallback when process memory is hidden.
 
-H200 MIG validation has confirmed the numerical gates for MLP and ResNet:
+The revised CuPy-only black-box run confirms the full-dataset numerical gates
+for all three released models:
 
 | Model | Accuracy | Maximum absolute difference | Cold wall time | CuPy-pool proxy |
 |---|---:|---:|---:|---:|
-| MLP | `0.9835` | `1.53e-05` | `0.768 s` | `3.96 MiB` |
-| ResNet-18 | `0.9351` | `8.58e-06` | `7.597 s` | `1492.25 MiB` |
+| MLP | `0.9835` | `1.53e-05` | `1.093 s` | `32.44 MiB` |
+| ResNet-18 | `0.9351` | `8.58e-06` | `7.877 s` | `1542.43 MiB` |
+| Transformer | n/a | `3.15e-05` | `1.743 s` | `247.35 MiB` |
 
-Transformer requires one final server rerun after the CuPy Split portability
-fix. CuPy execution on the remote H200 is the designated AEC device path.
+The runner did not observe the child processes through `nvidia-smi`, so these
+memory values are labeled CuPy-pool reservations and are not official NVML peak
+memory evidence. CuPy execution on the remote H200 is the designated AEC device
+path.
 
 ## Validation assets
 
@@ -142,10 +146,12 @@ gate and [remaining problems](remaining-problems.md) for unclosed items.
 | # | Change | Impact |
 |---|--------|--------|
 | 2 | Corrected and ran the FULL_FP32 golden-output gate on H200 | All three released models passed `allclose` and `top1_match=1.0`; direct decomposed-kernel execution remains #1/#36 |
+| 6 | Reran the revised CuPy-only optimized graph on all three full released datasets | Current released-graph C3.3/C3.5 numerical gates pass; physical fused-kernel lowering remains #27 |
 | 11, 29, 35 | Capped C3.3 and C3.4 self-scores to their maximums | C3.3: `8.60/8.6`, C3.4: `10.00/10.0` |
 | 28 | Added `FusedComputeActivation` plus bounded, topology-driven `FusedExecutionRegion` formation | Released-graph structural launch/logical-buffer reductions now exceed 60% for all three models; physical fused H200 lowering remains open in #27 |
 | 37 | Replaced scalar FP32 zero placeholder with `None` for omitted optional inputs | Type-agnostic optional input handling |
 | 43–44 | Reconciled academic/public-source attribution and AI-assistance disclosure with the implementation | TVM, DNNFusion, MLIR Linalg, CUDA Graphs, GitHub Copilot, and OpenAI Codex are disclosed; keep current after later revisions |
+| 46 | Ran the revised CuPy-only standard workflow on the remote H200 | All three released models pass; process-accounted NVML memory remains #39 |
 | — | Removed the unavailable Python NVML binding and disclosed the server-native `nvidia-smi` call boundary | Native-server dependency compliance |
 | — | Multi-level nvidia-smi fallback for MIG GPU process tracking | `--query-compute-apps`, per-GPU, and `--query-accounted-apps` probes |
 | — | Surfaced stderr/stdout tails on test failure for remote diagnostics | Faster crash triage |
@@ -156,7 +162,6 @@ gate and [remaining problems](remaining-problems.md) for unclosed items.
 |---|------|
 | 1–2 | AEC compiler/runtime/device backend |
 | 3–4 | C3.2 FP8/FP4 qualification and hardware query |
-| 6 | BN weight folding and fused AEC kernels |
 | 7–8 | C3.4 AEC runtime integration and stream concurrency |
 | 9, 36 | C3.2 kernel-step execution on H200 |
 | 12 | Evaluator benchmark API |
@@ -164,10 +169,9 @@ gate and [remaining problems](remaining-problems.md) for unclosed items.
 | 25–27 | Conv+BN weight folding and fused AEC kernel lowering |
 | 30–34 | C3.4 AEC device operations |
 | 38 | Non-default-attribute operator tests |
-| 39–40 | Cold timing, NVML memory, and kernel/runtime H200 path |
+| 39–40 | Process-accounted NVML memory and kernel/runtime H200 path |
 | 10, 41–42 | Complete native dependency verification/disclosure, including direct `google.protobuf` use |
 | 45 | Build and inspect the actual submission archive; `.gitignore` alone is not cleanliness evidence |
-| 46 | Run all three models through the revised CuPy-only CLI and runner on the H200 |
 | Q1–Q5 | Organizer questions |
 
 ## Review record
@@ -241,9 +245,10 @@ gate and [remaining problems](remaining-problems.md) for unclosed items.
 - Validation: C3.1 `7/7`, C3.2 structural `14.17/15.0` with H200 numerical test
   skipped locally, C3.3 `64/64`, and C3.4 `505/505`. The C3.5 cross-stage and
   shared scoring suites could not import CuPy on this local machine; remote
-  H200 numerical validation remains #46.
-- Public influences were disclosed in `docs/c33-fusion.md` and
-  `docs/SUBMISSION.md`: TVM, DNNFusion, MLIR Linalg, and the NVIDIA CUDA Graphs
+  H200 numerical validation was still #46 at this revision point; the later
+  three-model black-box report resolves it for the released models.
+- Public influences were disclosed in `docs/c33-fusion.md` and the root
+  `README.md`: TVM, DNNFusion, MLIR Linalg, and the NVIDIA CUDA Graphs
   guide. No source code or prose was copied.
 - Integrity gate: no plagiarism, testcase/model hardcoding, evaluator bypass,
   precomputed artifact, hidden-case targeting, or new dependency was
@@ -260,10 +265,59 @@ gate and [remaining problems](remaining-problems.md) for unclosed items.
   two-sample qualification batches. Maximum absolute differences were
   `2.86e-06`, `1.67e-06`, and `8.88e-06`, respectively.
 - This closes the C3.2 FULL_FP32 graph-path gate (#2), but not direct execution
-  of emitted kernel steps (#1/#36), full-dataset C3.5 validation (#46), or
-  FP8/FP4 qualification (#3).
+  of emitted kernel steps (#1/#36) or FP8/FP4 qualification (#3).
+  Full-dataset C3.5 validation (#46) was resolved by the later black-box report.
 - Integrity gate: the change corrects validation logic only; it adds no runtime
   dependency, model-specific execution branch, evaluator bypass, or generated
   result artifact.
 
-[remaining-problems](remaining-problems.md) · [SUBMISSION](SUBMISSION.md)
+### 2026-07-13 three-model H200 black-box report review
+
+- Examined `docs/c35_reports/1.json` from a CuPy 14.1.1 run on an NVIDIA H200
+  NVL MIG 1g.18gb. All three full released datasets passed output-contract and
+  golden `allclose` gates; MLP accuracy was `0.9835`, ResNet-18 accuracy was
+  `0.9351`, and Transformer required no classification threshold.
+- Recorded cold wall times of `1.093 s`, `7.877 s`, and `1.743 s` for MLP,
+  ResNet-18, and Transformer. These are valid per-run measurements but runtime
+  points remain unknowable until submissions are ranked.
+- The report's process sampler completed but did not observe a GPU process.
+  Its `32.44 MiB`, `1542.43 MiB`, and `247.35 MiB` memory figures came from
+  CuPy-pool reservations, not process-accounted NVML peaks; memory ranking
+  evidence remains open.
+- Confirmed the top-level ONNX files were byte-identical to the organizer copies,
+  removed the redundant `models/` directory, and redirected documentation and
+  tests to `.specification/testcases/release_to_competitors/models/`.
+- Post-relocation local validation passed: Python compilation, C3.1 plus
+  precision-policy unit tests (`12/12`), C3.2 structural scoring (`14.17/15`;
+  H200 numerical gate skipped locally), C3.3 (`64/64`), and C3.4 (`505/505`).
+- Integrity gate: the report shows no evidence of filename/hash branching,
+  evaluator bypass, or precomputed outputs. This review does not close the
+  existing direct-kernel, dependency-disclosure, or submission-archive blockers.
+
+### 2026-07-13 root README and submission-contract consolidation
+
+- Consolidated `docs/README.md` and `docs/SUBMISSION.md` into the root
+  `README.md`, then removed the redundant files and updated the archive
+  required-entry check.
+- Added the exact evaluator-substitution templates for C3.1 and C3.5, including
+  the specification's fixed registration value `--batch-size 256`, plus the
+  required three-public-model golden and label checks.
+- Preserved dependency, academic-source, originality, LLM-assistance, and
+  archive-policy disclosures in the root document. Corrected archive language
+  so cleanliness is not claimed before a post-commit artifact is built and
+  inspected.
+- Documented the unresolved conflict between the general third-party packaging
+  rule and the C3 native-environment contract; direct remote
+  `google.protobuf` verification and organizer confirmation remain open.
+- Documentation-only validation: both command templates match
+  `.specification/spec.md`; live links and build requirements no longer target
+  the removed documents; local Markdown targets, archive required-entry names,
+  and archive script syntax were checked. C3.1 `--help` passed. C3.5 parser
+  arguments match by source inspection; its local `--help` cannot import the
+  intentionally required CuPy dependency, so executable CLI validation remains
+  H200-only.
+- Integrity gate: no runtime behavior, evaluator component, dependency, or
+  generated result changed. Required attribution and AI-assistance disclosure
+  remain present in the submission root.
+
+[remaining-problems](remaining-problems.md) · [root submission disclosure](../README.md#submission-disclosure)
