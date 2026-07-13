@@ -124,4 +124,5 @@ Planning should use the internally consistent written allocation (15 + 25 + 10 =
 - [C3.3 fusion and graph optimization](c33-fusion.md)
 - [C3.4 memory planning and scheduling](c34-memory-scheduling.md)
 - [C3.5 end-to-end deployment](c35-deployment.md)
+- [C3.5 standard black-box runner](c35-standard-runner.md)
 - [Validation and submission checklist](validation-checklist.md)

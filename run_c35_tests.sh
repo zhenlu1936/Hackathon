@@ -2,6 +2,8 @@
 # ============================================================
 # C3.5 End-to-End Test Runner  (remote GPU server)
 # ============================================================
+# Development regression suite, not the written-spec black-box evaluator.
+# Use ./run_c35_standard.sh for standards-oriented execution/timing/NVML.
 # Run this ON the remote server (mig06), not locally.
 # Uses system python3 — no venv, no pytest.
 #

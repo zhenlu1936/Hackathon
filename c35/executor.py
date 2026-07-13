@@ -1,7 +1,8 @@
-"""C3.5 Graph Executor — walks the computation graph and executes nodes.
+"""C3.5 graph executor for the selected array backend.
 
 Manages the tensor value dictionary, loads weights from ONNX initializers,
-and executes nodes in topological order using the AEC compute engine.
+and executes nodes in topological order using CuPy by default from the CLI.
+This CUDA reference path is not the contest AEC runtime.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ import onnx
 
 from c3common.ir.graph import Graph, Node
 from c34.execution_plan import ExecutionPlan
-from c35.engine import execute_op
+from c35 import engine
 
 
 def _extract_initializer_data(model_path: str) -> Dict[str, np.ndarray]:
@@ -73,7 +74,7 @@ class GraphExecutor:
     """Executes a computation graph node by node.
 
     Walks the graph in topological order, looking up tensor values
-    and computing node outputs using the AEC compute engine.
+    and computing node outputs using the configured array backend.
 
     Attributes:
         graph: The parsed computation graph IR.
@@ -90,9 +91,15 @@ class GraphExecutor:
             model_path: Path to the .onnx file for weight extraction.
         """
         self.graph = graph
-        self.weights = _extract_initializer_data(model_path)
-        self.constants = _extract_constant_values(model_path)
-        self.values: Dict[str, np.ndarray] = {}
+        self.weights = {
+            name: engine.to_device(value)
+            for name, value in _extract_initializer_data(model_path).items()
+        }
+        self.constants = {
+            name: engine.to_device(value)
+            for name, value in _extract_constant_values(model_path).items()
+        }
+        self.values: Dict[str, Any] = {}
 
     def run(self, feed_dict: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
         """Execute the full graph.
@@ -159,7 +166,7 @@ class GraphExecutor:
         for inp_name in node.inputs:
             if not inp_name:
                 # Empty optional input — skip it for operators that can handle it
-                inputs.append(np.float32(0.0))
+                inputs.append(engine.to_device(np.float32(0.0)))
                 continue
             if inp_name not in self.values:
                 raise KeyError(
@@ -176,7 +183,7 @@ class GraphExecutor:
 
         # Execute
         try:
-            result = execute_op(op_type, inputs, attrs)
+            result = engine.execute_op(op_type, inputs, attrs)
         except Exception as e:
             raise RuntimeError(
                 f"Failed to execute node '{node.id}' ({op_type}): {e}"
@@ -187,22 +194,22 @@ class GraphExecutor:
             # Multi-output ops like Split
             for i, out_name in enumerate(node.outputs):
                 if out_name and i < len(result):
-                    self.values[out_name] = np.ascontiguousarray(
-                        np.asarray(result[i], dtype=np.float32)
+                    self.values[out_name] = engine.ascontiguousarray(
+                        result[i], dtype=engine.array_module().float32
                     )
         else:
             for out_name in node.outputs:
                 if out_name:
-                    self.values[out_name] = np.ascontiguousarray(
-                        np.asarray(result, dtype=np.float32)
+                    self.values[out_name] = engine.ascontiguousarray(
+                        result, dtype=engine.array_module().float32
                     )
 
 
 class PlannedGraphExecutor(GraphExecutor):
     """Reference executor whose node order is authorized by a C3.4 plan.
 
-    The plan contains decomposed C3.2 kernel steps.  This CPU reference still
-    evaluates each high-level node with NumPy, but it refuses to execute unless
+    The plan contains decomposed C3.2 kernel steps.  This array reference still
+    evaluates each high-level node with CuPy/NumPy, but it refuses to execute unless
     every planned kernel binding/event is valid and every optimized graph node
     is represented in the plan.  It therefore connects and tests the compiler
     stages without pretending to be the unavailable AEC device runtime.
@@ -267,7 +274,8 @@ class CrossStageReferencePipeline:
     optimized batch is checked against the original unfused FP32 graph.
     """
 
-    def __init__(self, graph: Graph, model_path: str) -> None:
+    def __init__(self, graph: Graph, model_path: str,
+                 qualify_optimizations: bool = False) -> None:
         from c33.pipeline import GraphPassPipeline
 
         baseline_graph = copy.deepcopy(graph)
@@ -277,10 +285,13 @@ class CrossStageReferencePipeline:
         if not stats["validation_passed"]:
             raise ValueError("C3.3 produced an invalid optimized graph")
 
-        self.baseline_executor = GraphExecutor(baseline_graph, model_path)
+        self.baseline_executor = (
+            GraphExecutor(baseline_graph, model_path)
+            if qualify_optimizations else None
+        )
         self.optimized_executor = PlannedGraphExecutor(self.graph, model_path)
         self._plan_cache: Dict[int, ExecutionPlan] = {}
-        self._qualified = False
+        self._qualified = not qualify_optimizations
         self.qualification_max_abs_diff: Optional[float] = None
         self.last_plan: Optional[ExecutionPlan] = None
 
@@ -307,6 +318,8 @@ class CrossStageReferencePipeline:
         optimized = self.optimized_executor.run_planned(feed_dict, plan)
 
         if not self._qualified:
+            if self.baseline_executor is None:
+                raise RuntimeError("Optimization qualification executor is unavailable")
             baseline = self.baseline_executor.run(feed_dict)
             max_diff = 0.0
             for name, expected in baseline.items():
@@ -321,9 +334,19 @@ class CrossStageReferencePipeline:
                 if actual.size:
                     max_diff = max(
                         max_diff,
-                        float(np.max(np.abs(actual.astype(np.float32) - expected.astype(np.float32)))),
+                        float(engine.array_module().max(
+                            engine.array_module().abs(
+                                actual.astype(engine.array_module().float32)
+                                - expected.astype(engine.array_module().float32)
+                            )
+                        ).item()),
                     )
-                if not np.allclose(actual, expected, rtol=1e-3, atol=1e-3):
+                aligned = engine.array_module().allclose(
+                    actual, expected, rtol=1e-3, atol=1e-3
+                )
+                if hasattr(aligned, "item"):
+                    aligned = aligned.item()
+                if not bool(aligned):
                     raise ValueError(
                         f"C3.3 numerical qualification failed for '{name}': "
                         f"max_abs_diff={max_diff:.6e}"
@@ -339,6 +362,8 @@ def load_and_infer(
     input_dir: str,
     output_dir: str,
     batch_size: Optional[int] = None,
+    backend: str = "cupy",
+    qualify_optimizations: bool = False,
 ) -> Dict[str, Any]:
     """Load model, run inference, and write outputs.
 
@@ -349,6 +374,8 @@ def load_and_infer(
         input_dir: Directory containing manifest.json and .npy input files.
         output_dir: Directory to write outputs (manifest.json + logits.npy).
         batch_size: Maximum batch size for processing. None means process all at once.
+        backend: ``cupy`` for CUDA execution or explicit ``numpy`` reference mode.
+        qualify_optimizations: Compare the first optimized batch with an unfused run.
 
     Returns:
         Dict with timing and metadata information.
@@ -359,6 +386,7 @@ def load_and_infer(
     from c31.import_onnx import import_onnx
 
     t_start = time.perf_counter()
+    engine.configure_backend(backend)
 
     # 1. Load ONNX graph
     t_parse_start = time.perf_counter()
@@ -463,7 +491,9 @@ def load_and_infer(
         actual_batch = min(batch_size, total_samples)
 
     # 5. Compile the connected C3.3/C3.4 reference pipeline and run batches.
-    executor = CrossStageReferencePipeline(graph, model_path)
+    executor = CrossStageReferencePipeline(
+        graph, model_path, qualify_optimizations=qualify_optimizations
+    )
     output_name = graph.outputs[0].name if graph.outputs else "logits"
     all_outputs: List[np.ndarray] = []
 
@@ -475,7 +505,7 @@ def load_and_infer(
         # Slice inputs
         batch_feed: Dict[str, np.ndarray] = {}
         for name, arr in input_arrays.items():
-            batch_feed[name] = arr[start:end]
+            batch_feed[name] = engine.to_device(arr[start:end])
 
         # Execute
         batch_outputs = executor.run(batch_feed)
@@ -484,8 +514,12 @@ def load_and_infer(
     t_infer_end = time.perf_counter()
 
     # 6. Concatenate outputs
-    final_output = np.concatenate(all_outputs, axis=0)
-    final_output = np.ascontiguousarray(final_output.astype(np.float32))
+    final_device_output = engine.array_module().concatenate(all_outputs, axis=0)
+    final_device_output = engine.ascontiguousarray(
+        final_device_output, dtype=engine.array_module().float32
+    )
+    engine.synchronize()
+    final_output = np.ascontiguousarray(engine.to_host(final_device_output))
 
     # 7. Validate output
     if final_output.shape[0] != total_samples:
@@ -527,6 +561,7 @@ def load_and_infer(
         "input_dir": input_dir,
         "output_dir": output_dir,
         "batch_size": actual_batch,
+        "backend": engine.backend_name(),
         "total_samples": total_samples,
         "output_shape": list(final_output.shape),
         "parse_time_s": t_parse_end - t_parse_start,

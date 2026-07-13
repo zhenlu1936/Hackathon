@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """C3.5: End-to-end model deployment CLI.
 
-Reads an ONNX model and input data, runs inference using the AEC GPGPU
-compute engine, and writes outputs with validation.
+Reads an ONNX model and input data, runs inference using the selected reference
+array backend, and writes outputs with validation.  CuPy/CUDA is the default;
+this does not claim compliance with the unavailable AEC runtime.
 
 Usage:
     python -m c35.deploy --onnx MODEL --input INPUT_DIR --output OUTPUT_DIR [--batch-size N]
@@ -100,6 +101,17 @@ def main() -> None:
         default=None,
         help="Optional path to labels.npy for accuracy computation",
     )
+    parser.add_argument(
+        "--backend",
+        choices=("cupy", "numpy"),
+        default="cupy",
+        help="Numerical backend (default: cupy; numpy is explicit reference mode)",
+    )
+    parser.add_argument(
+        "--qualify-optimizations",
+        action="store_true",
+        help="run an additional unfused first batch and compare it with optimized output",
+    )
 
     args = parser.parse_args()
 
@@ -140,6 +152,8 @@ def main() -> None:
             input_dir=input_dir,
             output_dir=output_dir,
             batch_size=batch_size,
+            backend=args.backend,
+            qualify_optimizations=args.qualify_optimizations,
         )
     except Exception as e:
         print(f"Error during inference: {e}", file=sys.stderr)
@@ -157,17 +171,21 @@ def main() -> None:
     if info.get("cross_stage_reference"):
         fusion = info["fusion_stats"]
         plan = info.get("plan_summary") or {}
-        print("  Backend:     connected C3 CPU reference (not AEC)", file=sys.stderr)
+        print(
+            f"  Backend:     connected C3 {info['backend']} reference (not AEC)",
+            file=sys.stderr,
+        )
         print(
             f"  Fusion:      {fusion['node_count_before']} -> "
             f"{fusion['node_count_after']} nodes",
             file=sys.stderr,
         )
-        print(
-            f"  FP32 check:  max_abs_diff="
-            f"{info['qualification_max_abs_diff']:.6e}",
-            file=sys.stderr,
-        )
+        if info["qualification_max_abs_diff"] is not None:
+            print(
+                f"  FP32 check:  max_abs_diff="
+                f"{info['qualification_max_abs_diff']:.6e}",
+                file=sys.stderr,
+            )
         print(
             f"  C3.4 plan:   {plan.get('total_kernels', 0)} kernels, "
             f"{plan.get('total_allocations', 0)} allocations",

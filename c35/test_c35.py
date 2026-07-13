@@ -43,6 +43,7 @@ class C35SpecificationTests(unittest.TestCase):
             "--onnx", str(model_path),
             "--input", str(input_dir),
             "--output", str(output_dir),
+            "--backend", "numpy",
         ]
         if batch_size is not None:
             cmd.extend(["--batch-size", str(batch_size)])

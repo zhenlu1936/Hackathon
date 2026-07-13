@@ -16,7 +16,7 @@ This register follows `.specification/general_requirements.md` first and `.speci
 | P1 | C3.3 correctness | Public reference qualification passes, but BN values cannot be folded and fused AEC kernels do not exist | F4 is unproven on the required backend |
 | P1 | C3.4 runtime | Allocations, copies, streams, and events are metadata, not AEC calls | Code-review complete-chain condition is unmet |
 | P1 | C3.4 concurrency | Linear lifetime reuse ignores stream happens-before; plan has separate transfer/kernel lists | Reuse safety and prefetch overlap are unproven |
-| P1 | C3.5 deployment | Connected C3.3/C3.4 execution is still a NumPy CPU reference | No AEC timing or NVML memory score is possible |
+| P1 | C3.5 deployment | Default numerical execution now uses CuPy/CUDA, but it still evaluates high-level nodes instead of AEC kernels | CUDA timing/memory are measurable, but this is not AEC compliance |
 | P1 | Submission | Offline dependencies and third-party/LLM/originality disclosures are incomplete | General-requirements compliance is incomplete |
 | P2 | Tests | C3.3/C3.4 self-scores exceed their maxima | Printed totals are not score evidence |
 | P2 | Evaluator API | Referenced C3.2/C3.3 benchmark is absent | Hidden API compatibility is unknown |
@@ -37,7 +37,7 @@ Completion evidence:
 5. `numpy.allclose(rtol=1e-3, atol=1e-3)` passes; MLP top-1 is at least 98% and ResNet top-1 at least 85%.
 6. CPU/NumPy/ONNX Runtime paths are clearly reference-only.
 
-Current reference status: C3.5 now optimizes the C3.1 graph with C3.3, builds a C3.2-decomposed C3.4 plan for each batch size, rejects invalid or graph-incomplete plans, and uses the plan's node order for NumPy execution. This closes the disconnected software-stage defect for correctness testing, but not the required AEC backend.
+Current reference status: C3.5 optimizes the C3.1 graph with C3.3, builds a C3.2-decomposed C3.4 plan for each batch size, rejects invalid or graph-incomplete plans, and uses the plan's node order for CuPy execution by default. This closes the disconnected software-stage defect for CUDA correctness/performance testing, but not the required AEC backend.
 
 ## P1: satisfy C3.2 without score gaming
 
@@ -85,7 +85,7 @@ Required work:
 
 ## P1: complete C3.5 evaluator behavior
 
-The NumPy path is now a connected reference oracle: it consumes the C3.3 graph and validates/uses the C3.4 plan. It is not an AEC deployment, and it still evaluates high-level nodes rather than executing individual decomposed kernels.
+The CuPy path is now the default connected reference: weights, constants, batches, intermediates, and operator computation stay on the CUDA device until final output collection. NumPy is available only through explicit `--backend numpy` development mode. Neither path is an AEC deployment, and both still evaluate high-level nodes rather than executing individual decomposed kernels.
 
 Remaining work:
 
@@ -93,6 +93,7 @@ Remaining work:
 - Preserve required intermediate dtypes and represent omitted optional inputs explicitly instead of scalar FP32 zero.
 - Test non-default attributes and hidden valid shapes for all operators.
 - Measure cold time and NVML per-process peak GPU memory on the target.
+- Replace CuPy high-level operator calls with submitted AEC kernel/runtime calls; GPU observation alone does not prove AEC execution.
 
 Written C3.5 scoring is correctness/accuracy 15, time 25, memory 10. Use the written rubric until the conflicting image is clarified.
 
@@ -117,6 +118,7 @@ The local macOS ARM environment is not evidence of parity with the specified Lin
 - Independent scoring regressions: 4/4 pass.
 - Cross-stage tests: 2/2 pass, covering all public models plus rejection of a plan/graph mismatch.
 - Complete golden CLI tests for MLP, ResNet, and Transformer pass through the connected reference path (187.041 seconds locally).
+- The standards-oriented black-box runner passes all released models in explicit reference mode: MLP 0.252s/0.9835 accuracy, ResNet 117.556s/0.9351 accuracy, Transformer 82.548s; all precision gates pass. Target NVML/AEC evidence remains unavailable locally.
 
 These positives do not override unresolved AEC, numerical-gate, reduction, runtime, or compliance items.
 

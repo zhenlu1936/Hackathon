@@ -8,7 +8,7 @@ The evaluator times the whole process from startup to exit and samples per-proce
 
 Inference must run on the required AEC GPGPU path. A CPU, PyTorch, ONNX Runtime, CUDA, or mock backend may be used as a disclosed development reference, but cannot silently substitute for the submitted AEC implementation. The timed command must build/load only disclosed submission components, perform no network access, and generate outputs from the supplied model and inputs at evaluation time.
 
-Current implementation note: the CPU reference is cross-stage rather than standalone. It applies C3.3 to the shared graph, builds the C3.4 plan through C3.2 decomposition, validates complete bindings/events and plan/graph identity, executes nodes in planned order, and qualifies the optimized first batch against unfused FP32. CLI output labels this path `connected C3 CPU reference (not AEC)`; it is correctness evidence only.
+Current implementation note: CuPy/CUDA is the default connected reference backend. It applies C3.3 to the shared graph, builds the C3.4 plan through C3.2 decomposition, validates complete bindings/events and plan/graph identity, and executes nodes in planned order. Weights and batches move to CuPy once and final outputs return to the host once. Optional `--qualify-optimizations` compares the first optimized batch against unfused FP32; it is disabled for scored timing. `--backend numpy` is an explicit development-only mode. Neither backend is AEC execution.
 
 ## CLI and data contract
 
@@ -103,3 +103,15 @@ Before exit, validate:
 - Output file generation becomes a significant part of measured wall time, especially Transformer logits.
 - An undeclared fallback backend makes results accurate but violates the required AEC execution path.
 - Build/runtime dependencies are unavailable because evaluation has no network access.
+
+## Standards-oriented execution
+
+Use `python3 -m c35.standard_runner` or `./run_c35_standard.sh` for black-box validation against released manifests, per-model thresholds, cold wall time, and NVML process-tree memory. `c35/test_c35.py` remains a broader development regression suite and is not equivalent to the unreleased organizer evaluator. See [C3.5 standard black-box runner](c35-standard-runner.md).
+
+On the GPU server, the normal workflow is one command:
+
+```bash
+./run_c35_standard.sh
+```
+
+It checks release-data presence, performs a real CuPy device smoke test, runs all three models in fresh subprocesses, samples memory using `pynvml` or an automatic `nvidia-smi` fallback, applies golden/accuracy gates, and writes `c35-standard-report.json`. Set `PYTHON`, `C35_REPORT`, or `COMMAND_TEMPLATE` only when overriding those defaults.

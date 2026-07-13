@@ -34,7 +34,8 @@ class CrossStagePipelineTests(unittest.TestCase):
             with self.subTest(model=model):
                 model_path = ROOT / "models" / f"{model}_v1.onnx"
                 pipeline = CrossStageReferencePipeline(
-                    import_onnx(str(model_path)), str(model_path)
+                    import_onnx(str(model_path)), str(model_path),
+                    qualify_optimizations=True,
                 )
                 outputs = pipeline.run(self._feed(model))
                 self.assertIn("logits", outputs)
