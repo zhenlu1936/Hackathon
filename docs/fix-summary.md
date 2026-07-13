@@ -40,10 +40,12 @@ open release blockers. Public-source and AI-assistance disclosures are current.
   configured hardware limits.
 
 The released C3.2 checks report `14.17/15` structurally. FULL_FP32 numerical
-correctness is a hard D1 gate, not a sixteenth point: the H200-only validation
-path compares connected C3.1→C3.5 CuPy outputs with golden results using
-`max_abs_diff <= 1e-3` and `top1_match >= 0.99`. It has not been rerun after
-the bounded-region revision. FP8/FP4 H200 correctness also remains unproven.
+correctness is a hard D1 gate, not a sixteenth point. On the remote H200 after
+the bounded-region revision, the connected C3.1→C3.5 CuPy comparison passed
+all three two-sample qualification batches with `top1_match=1.0`: MLP
+`max_abs_diff=2.86e-06`, ResNet-18 `1.67e-06`, and Transformer `8.88e-06`.
+This does not prove direct execution of individual C3.2 kernel steps or qualify
+FP8/FP4 H200 correctness.
 
 ## C3.3 fusion
 
@@ -139,6 +141,7 @@ gate and [remaining problems](remaining-problems.md) for unclosed items.
 
 | # | Change | Impact |
 |---|--------|--------|
+| 2 | Corrected and ran the FULL_FP32 golden-output gate on H200 | All three released models passed `allclose` and `top1_match=1.0`; direct decomposed-kernel execution remains #1/#36 |
 | 11, 29, 35 | Capped C3.3 and C3.4 self-scores to their maximums | C3.3: `8.60/8.6`, C3.4: `10.00/10.0` |
 | 28 | Added `FusedComputeActivation` plus bounded, topology-driven `FusedExecutionRegion` formation | Released-graph structural launch/logical-buffer reductions now exceed 60% for all three models; physical fused H200 lowering remains open in #27 |
 | 37 | Replaced scalar FP32 zero placeholder with `None` for omitted optional inputs | Type-agnostic optional input handling |
@@ -245,5 +248,22 @@ gate and [remaining problems](remaining-problems.md) for unclosed items.
 - Integrity gate: no plagiarism, testcase/model hardcoding, evaluator bypass,
   precomputed artifact, hidden-case targeting, or new dependency was
   introduced. Public references and OpenAI Codex assistance are disclosed.
+
+### 2026-07-13 H200 FULL_FP32 gate correction
+
+- Removed an invalid self-test heuristic that inferred precision from helper
+  kernel names. FULL_FP32 precision is defined by the selected
+  `PrecisionProfile`; decomposition completeness is checked independently.
+- Remote H200 evidence supplied after the bounded-region revision: all 219
+  nodes selected FP32, all 219 decomposed, and MLP, ResNet-18, and Transformer
+  passed `cupy.allclose(rtol=1e-3, atol=1e-3)` with `top1_match=1.0` on the
+  two-sample qualification batches. Maximum absolute differences were
+  `2.86e-06`, `1.67e-06`, and `8.88e-06`, respectively.
+- This closes the C3.2 FULL_FP32 graph-path gate (#2), but not direct execution
+  of emitted kernel steps (#1/#36), full-dataset C3.5 validation (#46), or
+  FP8/FP4 qualification (#3).
+- Integrity gate: the change corrects validation logic only; it adds no runtime
+  dependency, model-specific execution branch, evaluator bypass, or generated
+  result artifact.
 
 [remaining-problems](remaining-problems.md) · [SUBMISSION](SUBMISSION.md)

@@ -112,13 +112,6 @@ def test_full_fp32_numerical(graphs: Dict[str, Graph]) -> float:
             kernels = fp32_strategy.decompose(node, graph, prec)
             if kernels:
                 all_decomposed += 1
-                for k in kernels:
-                    if "f32" not in k.kernel_name and not k.kernel_name.endswith("_fp32"):
-                        if k.kernel_name not in ("reshape", "transpose", "flatten",
-                                                  "split", "gather", "constant",
-                                                  "reduce_max", "reduce_sum", "reduce_mean",
-                                                  "exp", "sqrt"):
-                            all_fp32 = False
 
     d0a_score = 0.4 if all_fp32 else 0.0
     check(all_fp32,

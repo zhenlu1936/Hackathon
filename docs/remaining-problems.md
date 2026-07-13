@@ -1,8 +1,8 @@
 # Known limitations and completion gates
 
-Updated: 2026-07-13 (cleanup and scoring audit) — the published structural
-threshold in #5 remains resolved; #2 is reopened until the corrected FULL_FP32
-gate runs on H200; physical region lowering remains #27
+Updated: 2026-07-13 (H200 FULL_FP32 follow-up) — #2 is resolved by current
+three-model H200 golden comparisons; direct C3.2 kernel-step execution remains
+#1/#36, full-dataset validation remains #46, and physical fusion remains #27
 
 This release register follows `.specification/general_requirements.md` first and
 `.specification/scoring.md` second. A check closes a scoring item only when it
@@ -13,7 +13,7 @@ exercises the same artifact and backend evaluated by the organizer.
 | # | Priority | Area | Remaining problem | Scoring consequence |
 |---|----------|------|-------------------|--------------------|
 | 1 | P0 | Architecture | C3.2 kernel steps and C3.4 plan operations do not directly drive H200 execution | C3.2/C3.4 implementation claims remain partly structural |
-| 2 | P0 | Correctness | The corrected FULL_FP32 H200 gate exists but has not run after bounded-region fusion; it now checks `max_abs_diff <= 1e-3` and `top1_match >= 0.99` without adding a sixteenth C3.2 point | C3.2 hard numerical condition remains unproven |
+| 2 | ~~P0~~ | ~~Correctness~~ | The corrected FULL_FP32 graph-path gate passed all three released models on H200 with `top1_match=1.0` and maximum absolute differences at or below `8.88e-06` | ~~C3.2 hard numerical condition unproven~~ → Resolved for the connected high-level CuPy path; direct kernel-step execution remains #1/#36 |
 | 3 | P1 | C3.2 precision | Mixed routing covers four precisions structurally, but FP8/FP4 H200 kernels are not numerically qualified | D1 routing signals pass; low-precision correctness remains unproven |
 | 4 | P1 | C3.2 hardware | Default target is an unverified capability profile rather than an AEC query | Capability and D5 claims may be false |
 | 5 | ~~P1~~ | ~~C3.3 structural reduction~~ | Bounded, topology-driven execution regions exceed the published 60% launch/logical-buffer thresholds on all three released graphs | ~~F2/F3 structural threshold unmet~~ → Resolved locally; not physical H200-launch evidence |
@@ -142,6 +142,10 @@ The local macOS ARM environment is not evidence of parity with the specified Lin
 
 - C3.1: 7/7 tests pass.
 - C3.2: structural script completes at 14.17/15; D1 is 3.0/3.0; five precision-policy and four independent scoring regressions pass.
+- C3.2 FULL_FP32 H200 graph-path gate: all 219 nodes select FP32 and decompose;
+  MLP, ResNet-18, and Transformer two-sample comparisons pass `allclose` with
+  `top1_match=1.0` and maximum absolute differences `2.86e-06`, `1.67e-06`,
+  and `8.88e-06`. This is not direct C3.2 kernel-step execution evidence.
 - C3.3: 64 structural checks pass, including the bounded-region ABI and
   released-graph threshold evidence; independent EW-chain and Conv+BN
   numerical regressions are historical until rerun on H200.
