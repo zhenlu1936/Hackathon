@@ -335,6 +335,16 @@ only runtime SHA-256 use names a generated elementwise kernel from its general
 semantic operation sequence; it does not inspect a model, input, test ID,
 filename, weight, or expected output.
 
+## Post-commit synchronization audit
+
+The local and remote framework trees were compared again on 2026-07-13 using
+SHA-256 content manifests rather than their different Git baselines. The only
+drift was an ignored, reproducible root-level `c35-standard-report.json` on the
+remote server; it was not tracked or consumed by runtime and was removed. The
+resulting manifests each contain 78 framework files with zero content
+differences. No code, dependency, evaluator component, correctness claim, or
+active issue changed. The six-rule integrity and disclosure gate remains clear.
+
 [Remaining problems](remaining-problems.md) ·
 [Validation checklist](validation-checklist.md) ·
 [Submission disclosure](../README.md#submission-disclosure)

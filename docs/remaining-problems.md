@@ -145,3 +145,9 @@ The final integrity/package audit found no new active issue: local and remote
 and the 71-member staged-tree archive contains all 11 required entries with
 zero forbidden paths. Historical reports and the agent skill remain retained
 in the repository but are excluded from the competition archive.
+
+The 2026-07-13 post-commit synchronization audit removed one ignored,
+reproducible root-level C3.5 report from the remote worktree and confirmed
+matching 78-file SHA-256 manifests. This cleanup does not change or close any
+active architecture, precision, fusion, memory, concurrency, peak-memory, or
+evaluator-contract issue.
